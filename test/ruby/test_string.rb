@@ -1,5 +1,4 @@
 require 'test/unit'
-require_relative 'envutil'
 
 # use of $= is deprecated after 1.7.1
 def pre_1_7_1
@@ -505,6 +504,14 @@ class TestString < Test::Unit::TestCase
   def test_crypt
     assert_equal(S('aaGUC/JkO9/Sc'), S("mypassword").crypt(S("aa")))
     assert_not_equal(S('aaGUC/JkO9/Sc'), S("mypassword").crypt(S("ab")))
+    assert_raise(ArgumentError) {S("mypassword").crypt(S(""))}
+    assert_raise(ArgumentError) {S("mypassword").crypt(S("\0a"))}
+    assert_raise(ArgumentError) {S("mypassword").crypt(S("a\0"))}
+    [Encoding::UTF_16BE, Encoding::UTF_16LE,
+     Encoding::UTF_32BE, Encoding::UTF_32LE].each do |enc|
+      assert_raise(ArgumentError) {S("mypassword").crypt(S("aa".encode(enc)))}
+      assert_raise(ArgumentError) {S("mypassword".encode(enc)).crypt(S("aa"))}
+    end
   end
 
   def test_delete
@@ -834,6 +841,9 @@ class TestString < Test::Unit::TestCase
     assert_equal Encoding::UTF_8, a.gsub(/world/, c).encoding
 
     assert_equal S("a\u{e9}apos&lt;"), S("a\u{e9}'&lt;").gsub("'", "apos")
+
+    bug9849 = '[ruby-core:62669] [Bug #9849]'
+    assert_equal S("\u{3042 3042 3042}!foo!"), S("\u{3042 3042 3042}/foo/").gsub("/", "!"), bug9849
   end
 
   def test_gsub!
@@ -1192,6 +1202,11 @@ class TestString < Test::Unit::TestCase
     assert_equal(S("Bar"), S("FooBar").slice(S("Bar")))
     assert_nil(S("FooBar").slice(S("xyzzy")))
     assert_nil(S("FooBar").slice(S("plugh")))
+
+    bug9882 = '[ruby-core:62842] [Bug #9882]'
+    substr = S("\u{30c6 30b9 30c8 2019}#{bug9882}").slice(4..-1)
+    assert_equal(S(bug9882).hash, substr.hash, bug9882)
+    assert_predicate(substr, :ascii_only?, bug9882)
   end
 
   def test_slice!
@@ -1576,6 +1591,8 @@ class TestString < Test::Unit::TestCase
     assert_equal(16, n.sum(17))
     n[0] = 2.chr
     assert_not_equal(15, n.sum)
+    assert_equal(17, n.sum(0))
+    assert_equal(17, n.sum(-1))
   end
 
   def check_sum(str, bits=16)
@@ -1590,7 +1607,7 @@ class TestString < Test::Unit::TestCase
     assert_equal(294, "abc".sum)
     check_sum("abc")
     check_sum("\x80")
-    0.upto(70) {|bits|
+    -3.upto(70) {|bits|
       check_sum("xyz", bits)
     }
   end
@@ -2047,6 +2064,11 @@ class TestString < Test::Unit::TestCase
 
   def test_setter
     assert_raise(TypeError) { $/ = 1 }
+    name = "\u{5206 884c}"
+    assert_separately([], <<-"end;") #    do
+      alias $#{name} $/
+      assert_raise_with_message(TypeError, /\\$#{name}/) { $#{name} = 1 }
+    end;
   end
 
   def test_to_id
@@ -2255,14 +2277,15 @@ class TestString < Test::Unit::TestCase
 
   def test_LSHIFT_neary_long_max
     return unless @cls == String
-    assert_ruby_status([], <<-'end;', '[ruby-core:61886] [Bug #9709]')
+    assert_ruby_status([], <<-'end;', '[ruby-core:61886] [Bug #9709]', timeout: 20)
       begin
         a = "a" * 0x4000_0000
         a << "a" * 0x1_0000
       rescue NoMemoryError
       end
     end;
-  end
+  end if [0].pack("l!").bytesize < [nil].pack("p").bytesize
+  # enable only when string size range is smaller than memory space
 end
 
 class TestString2 < TestString

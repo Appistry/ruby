@@ -10,11 +10,7 @@
 
 require 'socket'
 require 'fcntl'
-begin
-  require 'etc'
-rescue LoadError
-  nil
-end
+require 'etc'
 
 module WEBrick
   module Utils
@@ -41,8 +37,7 @@ module WEBrick
     ##
     # Changes the process's uid and gid to the ones of +user+
     def su(user)
-      if defined?(Etc)
-        pw = Etc.getpwnam(user)
+      if pw = Etc.getpwnam(user)
         Process::initgroups(user, pw.gid)
         Process::Sys::setgid(pw.gid)
         Process::Sys::setuid(pw.uid)
@@ -68,14 +63,16 @@ module WEBrick
     # Creates TCP server sockets bound to +address+:+port+ and returns them.
     #
     # It will create IPV4 and IPV6 sockets on all interfaces.
-    def create_listeners(address, port, logger=nil)
+    def create_listeners(address, port)
       unless port
         raise ArgumentError, "must specify port"
       end
       sockets = Socket.tcp_server_sockets(address, port)
       sockets = sockets.map {|s|
         s.autoclose = false
-        TCPServer.for_fd(s.fileno)
+        ts = TCPServer.for_fd(s.fileno)
+        s.close
+        ts
       }
       return sockets
     end
@@ -131,6 +128,8 @@ module WEBrick
     #
     class TimeoutHandler
       include Singleton
+
+      class Thread < ::Thread; end
 
       ##
       # Mutex used to synchronize access across threads

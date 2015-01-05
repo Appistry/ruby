@@ -158,7 +158,7 @@ class Resolv
   ##
   # Indicates a timeout resolving a name or address.
 
-  class ResolvTimeout < TimeoutError; end
+  class ResolvTimeout < Timeout::Error; end
 
   ##
   # Resolv::Hosts is a hostname resolver that uses the system hosts file.
@@ -1066,6 +1066,10 @@ class Resolv
             candidates = []
           end
           candidates.concat(@search.map {|domain| Name.new(name.to_a + domain)})
+          fname = Name.create("#{name}.")
+          if !candidates.include?(fname)
+            candidates << fname
+          end
         end
         return candidates
       end
@@ -1166,7 +1170,9 @@ class Resolv
       class Str # :nodoc:
         def initialize(string)
           @string = string
-          @downcase = string.downcase
+          # case insensivity of DNS labels doesn't apply non-ASCII characters. [RFC 4343]
+          # This assumes @string is given in ASCII compatible encoding.
+          @downcase = string.b.downcase
         end
         attr_reader :string, :downcase
 
@@ -1175,11 +1181,11 @@ class Resolv
         end
 
         def inspect
-          return "#<#{self.class} #{self.to_s}>"
+          return "#<#{self.class} #{self}>"
         end
 
         def ==(other)
-          return @downcase == other.downcase
+          return self.class == other.class && @downcase == other.downcase
         end
 
         def eql?(other)
@@ -1215,12 +1221,20 @@ class Resolv
       end
 
       def initialize(labels, absolute=true) # :nodoc:
+        labels = labels.map {|label|
+          case label
+          when String then Label::Str.new(label)
+          when Label::Str then label
+          else
+            raise ArgumentError, "unexpected label: #{label.inspect}"
+          end
+        }
         @labels = labels
         @absolute = absolute
       end
 
       def inspect # :nodoc:
-        "#<#{self.class}: #{self.to_s}#{@absolute ? '.' : ''}>"
+        "#<#{self.class}: #{self}#{@absolute ? '.' : ''}>"
       end
 
       ##
@@ -1232,7 +1246,8 @@ class Resolv
 
       def ==(other) # :nodoc:
         return false unless Name === other
-        return @labels.join == other.to_a.join && @absolute == other.absolute?
+        return false unless @absolute == other.absolute?
+        return @labels == other.to_a
       end
 
       alias eql? == # :nodoc:
@@ -2346,7 +2361,7 @@ class Resolv
     end
 
     def inspect # :nodoc:
-      return "#<#{self.class} #{self.to_s}>"
+      return "#<#{self.class} #{self}>"
     end
 
     ##
@@ -2489,7 +2504,7 @@ class Resolv
     end
 
     def inspect # :nodoc:
-      return "#<#{self.class} #{self.to_s}>"
+      return "#<#{self.class} #{self}>"
     end
 
     ##
@@ -2639,7 +2654,7 @@ class Resolv
       end
 
       def inspect # :nodoc:
-        return "#<#{self.class} #{self.to_s}>"
+        return "#<#{self.class} #{self}>"
       end
 
       def ==(other) # :nodoc:
@@ -2728,7 +2743,7 @@ class Resolv
       end
 
       def inspect # :nodoc:
-        return "#<#{self.class} #{self.to_s}>"
+        return "#<#{self.class} #{self}>"
       end
 
       def ==(other) # :nodoc:
@@ -2790,7 +2805,7 @@ class Resolv
       end
 
       def inspect # :nodoc:
-        return "#<#{self.class} #{self.to_s}>"
+        return "#<#{self.class} #{self}>"
       end
 
       def ==(other) # :nodoc:

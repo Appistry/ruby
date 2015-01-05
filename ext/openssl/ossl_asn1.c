@@ -495,7 +495,7 @@ typedef struct {
     VALUE *klass;
 } ossl_asn1_info_t;
 
-static ossl_asn1_info_t ossl_asn1_info[] = {
+static const ossl_asn1_info_t ossl_asn1_info[] = {
     { "EOC",               &cASN1EndOfContent,    },  /*  0 */
     { "BOOLEAN",           &cASN1Boolean,         },  /*  1 */
     { "INTEGER",           &cASN1Integer,         },  /*  2 */
@@ -529,7 +529,7 @@ static ossl_asn1_info_t ossl_asn1_info[] = {
     { "BMPSTRING",         &cASN1BMPString,       },  /* 30 */
 };
 
-int ossl_asn1_info_size = (sizeof(ossl_asn1_info)/sizeof(ossl_asn1_info[0]));
+enum {ossl_asn1_info_size = (sizeof(ossl_asn1_info)/sizeof(ossl_asn1_info[0]))};
 
 static VALUE class_tag_map;
 
@@ -1150,7 +1150,7 @@ ossl_asn1_initialize(int argc, VALUE *argv, VALUE self)
 	}
 	if(!SYMBOL_P(tag_class))
 	    ossl_raise(eASN1Error, "invalid tag class");
-	if(SYM2ID(tagging) == sIMPLICIT && NUM2INT(tag) > 31)
+	if(!NIL_P(tagging) && SYM2ID(tagging) == sIMPLICIT && NUM2INT(tag) > 31)
 	    ossl_raise(eASN1Error, "tag number for Universal too large");
     }
     else{
@@ -1472,7 +1472,7 @@ OSSL_ASN1_IMPL_FACTORY_METHOD(Set)
 OSSL_ASN1_IMPL_FACTORY_METHOD(EndOfContent)
 
 void
-Init_ossl_asn1()
+Init_ossl_asn1(void)
 {
     VALUE ary;
     int i;

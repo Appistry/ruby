@@ -1,5 +1,4 @@
 require 'test/unit'
-require_relative 'envutil'
 
 class TestSetTraceFunc < Test::Unit::TestCase
   def setup
@@ -285,11 +284,9 @@ class TestSetTraceFunc < Test::Unit::TestCase
 
     [["c-return", 1, :set_trace_func, Kernel],
      ["line", 4, __method__, self.class],
-     ["c-call", 4, :any?, Enumerable],
-     ["c-call", 4, :each, Array],
+     ["c-call", 4, :any?, Array],
      ["line", 4, __method__, self.class],
-     ["c-return", 4, :each, Array],
-     ["c-return", 4, :any?, Enumerable],
+     ["c-return", 4, :any?, Array],
      ["line", 5, __method__, self.class],
      ["c-call", 5, :set_trace_func, Kernel]].each{|e|
       assert_equal(e, events.shift)
@@ -383,7 +380,7 @@ class TestSetTraceFunc < Test::Unit::TestCase
 
     [["c-return", 3, :set_trace_func, Kernel],
      ["line", 6, __method__, self.class],
-     ["call", 6, :foobar, FooBar],
+     ["call", 1, :foobar, FooBar],
      ["return", 6, :foobar, FooBar],
      ["line", 7, __method__, self.class],
      ["c-call", 7, :set_trace_func, Kernel]].each{|e|
@@ -509,7 +506,6 @@ class TestSetTraceFunc < Test::Unit::TestCase
      [:return,  16, "xyzzy", xyzzy.class, :bar,             xyzzy,       :XYZZY_bar, xyzzy],
      [:return,  12, "xyzzy", xyzzy.class, :foo,             xyzzy,       :XYZZY_foo, xyzzy],
      [:line,    20, "xyzzy", TestSetTraceFunc, method,      self,        :outer, :nothing],
-     [:line,    20, "xyzzy", TestSetTraceFunc, method,      self,        :outer, :nothing],
      [:c_call,  20, "xyzzy", Kernel,      :raise,           self,        :outer, :nothing],
      [:c_call,  20, "xyzzy", Exception,   :exception,       RuntimeError, :outer, :nothing],
      [:c_call,  20, "xyzzy", Exception,   :initialize,      raised_exc,  :outer, :nothing],
@@ -565,14 +561,18 @@ class TestSetTraceFunc < Test::Unit::TestCase
   def test_tracepoint
     events1, answer_events = *trace_by_tracepoint(:line, :class, :end, :call, :return, :c_call, :c_return, :raise)
 
-    mesg = events1.map{|e|
-      if false
-        p [:event, e[0]]
-        p [:line_file, e[1], e[2]]
-        p [:id, e[4]]
+    ms = [events1, answer_events].map{|evs|
+      evs.map{|e|
+        "#{e[0]} - #{e[2]}:#{e[1]} id: #{e[4]}"
+      }
+    }
+
+    mesg = ms[0].zip(ms[1]).map{|a, b|
+      if a != b
+        "#{a} <-> #{b}"
       end
-      "#{e[0]} - #{e[2]}:#{e[1]} id: #{e[4]}"
-    }.join("\n")
+    }.compact.join("\n")
+
     answer_events.zip(events1){|answer, event|
       assert_equal answer, event, mesg
     }
@@ -1156,4 +1156,159 @@ class TestSetTraceFunc < Test::Unit::TestCase
     ], events, bug59398)
   end
 
+  class C9759
+    define_method(:foo){
+      raise
+    }
+  end
+
+  def test_define_method_on_exception
+    events = []
+    obj = C9759.new
+    TracePoint.new(:call, :return){|tp|
+      next unless target_thread?
+      events << [tp.event, tp.method_id]
+    }.enable{
+      obj.foo rescue nil
+    }
+    assert_equal([[:call, :foo], [:return, :foo]], events, 'Bug #9759')
+
+    events = []
+    begin
+      set_trace_func(lambda{|event, file, lineno, mid, binding, klass|
+        next unless target_thread?
+        case event
+        when 'call', 'return'
+          events << [event, mid]
+        end
+      })
+      obj.foo rescue nil
+      set_trace_func(nil)
+
+      assert_equal([['call', :foo], ['return', :foo]], events, 'Bug #9759')
+    ensure
+    end
+  end
+
+  def test_recursive
+    assert_ruby_status [], %q{
+      stack = []
+      TracePoint.new(:c_call){|tp|
+        p 2
+        stack << tp.method_id
+      }.enable{
+        p 1
+      }
+      raise if stack != [:p, :hash, :inspect]
+    }, '[Bug #9940]'
+  end
+
+  def method_prefix event
+    case event
+    when :call, :return
+      :n
+    when :c_call, :c_return
+      :c
+    when :b_call, :b_return
+      :b
+    end
+  end
+
+  def method_label tp
+    "#{method_prefix(tp.event)}##{tp.method_id}"
+  end
+
+  def assert_consistent_call_return message='', check_events: nil
+    check_events ||= %i(a_call a_return)
+    call_stack = []
+
+    TracePoint.new(*check_events){|tp|
+      next unless target_thread?
+
+      case tp.event.to_s
+      when /call/
+        call_stack << method_label(tp)
+      when /return/
+        frame = call_stack.pop
+        assert_equal(frame, method_label(tp))
+      end
+    }.enable do
+      yield
+    end
+
+    assert_equal true, call_stack.empty?
+  end
+
+  def method_test_rescue_should_not_cause_b_return
+    begin
+      raise
+    rescue
+      return
+    end
+  end
+
+  def method_test_ensure_should_not_cause_b_return
+    begin
+      raise
+    ensure
+      return
+    end
+  end
+
+  def test_rescue_and_ensure_should_not_cause_b_return
+    assert_consistent_call_return '[Bug #9957]' do
+      method_test_rescue_should_not_cause_b_return
+      begin
+        method_test_ensure_should_not_cause_b_return
+      rescue
+        # ignore
+      end
+    end
+  end
+
+  define_method(:method_test_argument_error_on_bmethod){|correct_key: 1|}
+
+  def test_argument_error_on_bmethod
+    assert_consistent_call_return '[Bug #9959]' do
+      begin
+        method_test_argument_error_on_bmethod(wrong_key: 2)
+      rescue => e
+        # ignore
+      end
+    end
+  end
+
+  def test_rb_rescue
+    assert_consistent_call_return '[Bug #9961]' do
+      begin
+        -Numeric.new
+      rescue => e
+        # ignore
+      end
+    end
+  end
+
+  def test_b_call_with_redo
+    assert_consistent_call_return '[Bug #9964]' do
+      i = 0
+      1.times{
+        break if (i+=1) > 10
+        redo
+      }
+    end
+  end
+
+  def test_no_duplicate_line_events
+    lines = []
+    dummy = []
+
+    TracePoint.new(:line){|tp|
+      next unless target_thread?
+      lines << tp.lineno
+    }.enable{
+      dummy << (1) + (2)
+      dummy << (1) + (2)
+    }
+    assert_equal [__LINE__ - 3, __LINE__ - 2], lines, 'Bug #10449'
+  end
 end

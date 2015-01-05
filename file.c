@@ -23,14 +23,16 @@
 #include <CoreFoundation/CFString.h>
 #endif
 
-#include "ruby/ruby.h"
+#include "internal.h"
 #include "ruby/io.h"
 #include "ruby/util.h"
 #include "dln.h"
-#include "internal.h"
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
+#endif
+#ifdef HAVE_SYS_TIME_H
+# include <sys/time.h>
 #endif
 
 #ifdef HAVE_SYS_FILE_H
@@ -63,12 +65,15 @@ int flock(int, int);
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#if defined(__native_client__) && defined(NACL_NEWLIB)
-# include "nacl/utime.h"
-# include "nacl/stat.h"
-# include "nacl/unistd.h"
+#if defined(__native_client__)
+# if defined(NACL_NEWLIB)
+#  include "nacl/utime.h"
+#  include "nacl/stat.h"
+#  include "nacl/unistd.h"
+# else
+#  undef HAVE_UTIMENSAT
+# endif
 #endif
-
 
 #ifdef HAVE_SYS_MKDEV_H
 #include <sys/mkdev.h>
@@ -310,6 +315,38 @@ rb_str_normalize_ospath(const char *ptr, long len)
 
     return str;
 }
+
+static int
+ignored_char_p(const char *p, const char *e, rb_encoding *enc)
+{
+    unsigned char c;
+    if (p+3 > e) return 0;
+    switch ((unsigned char)*p) {
+      case 0xe2:
+	switch ((unsigned char)p[1]) {
+	  case 0x80:
+	    c = (unsigned char)p[2];
+	    /* c >= 0x200c && c <= 0x200f */
+	    if (c >= 0x8c && c <= 0x8f) return 3;
+	    /* c >= 0x202a && c <= 0x202e */
+	    if (c >= 0xaa && c <= 0xae) return 3;
+	    return 0;
+	  case 0x81:
+	    c = (unsigned char)p[2];
+	    /* c >= 0x206a && c <= 0x206f */
+	    if (c >= 0xaa && c <= 0xaf) return 3;
+	    return 0;
+	}
+	break;
+      case 0xef:
+	/* c == 0xfeff */
+	if ((unsigned char)p[1] == 0xbb &&
+	    (unsigned char)p[2] == 0xbf)
+	    return 3;
+	break;
+    }
+    return 0;
+}
 #endif
 
 static long
@@ -362,7 +399,7 @@ stat_memsize(const void *p)
 static const rb_data_type_t stat_data_type = {
     "stat",
     {NULL, RUBY_TYPED_DEFAULT_FREE, stat_memsize,},
-    NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
+    0, 0, RUBY_TYPED_FREE_IMMEDIATELY
 };
 
 static VALUE
@@ -720,7 +757,7 @@ stat_atimespec(struct stat *st)
 #elif defined(HAVE_STRUCT_STAT_ST_ATIMESPEC)
     ts.tv_nsec = st->st_atimespec.tv_nsec;
 #elif defined(HAVE_STRUCT_STAT_ST_ATIMENSEC)
-    ts.tv_nsec = st->st_atimensec;
+    ts.tv_nsec = (long)st->st_atimensec;
 #else
     ts.tv_nsec = 0;
 #endif
@@ -744,7 +781,7 @@ stat_mtimespec(struct stat *st)
 #elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC)
     ts.tv_nsec = st->st_mtimespec.tv_nsec;
 #elif defined(HAVE_STRUCT_STAT_ST_MTIMENSEC)
-    ts.tv_nsec = st->st_mtimensec;
+    ts.tv_nsec = (long)st->st_mtimensec;
 #else
     ts.tv_nsec = 0;
 #endif
@@ -768,7 +805,7 @@ stat_ctimespec(struct stat *st)
 #elif defined(HAVE_STRUCT_STAT_ST_CTIMESPEC)
     ts.tv_nsec = st->st_ctimespec.tv_nsec;
 #elif defined(HAVE_STRUCT_STAT_ST_CTIMENSEC)
-    ts.tv_nsec = st->st_ctimensec;
+    ts.tv_nsec = (long)st->st_ctimensec;
 #else
     ts.tv_nsec = 0;
 #endif
@@ -781,6 +818,20 @@ stat_ctime(struct stat *st)
     struct timespec ts = stat_ctimespec(st);
     return rb_time_nano_new(ts.tv_sec, ts.tv_nsec);
 }
+
+#define HAVE_STAT_BIRTHTIME
+#if defined(HAVE_STRUCT_STAT_ST_BIRTHTIMESPEC)
+static VALUE
+stat_birthtime(struct stat *st)
+{
+    struct timespec *ts = &st->st_birthtimespec;
+    return rb_time_nano_new(ts->tv_sec, ts->tv_nsec);
+}
+#elif defined(_WIN32)
+# define stat_birthtime stat_ctime
+#else
+# undef HAVE_STAT_BIRTHTIME
+#endif
 
 /*
  *  call-seq:
@@ -835,6 +886,37 @@ rb_stat_ctime(VALUE self)
     return stat_ctime(get_stat(self));
 }
 
+#if defined(HAVE_STAT_BIRTHTIME)
+/*
+ *  call-seq:
+ *     stat.birthtime  ->  aTime
+ *
+ *  Returns the birth time for <i>stat</i>.
+ *  If the platform doesn't have birthtime, returns <i>ctime</i>.
+ *
+ *     File.write("testfile", "foo")
+ *     sleep 10
+ *     File.write("testfile", "bar")
+ *     sleep 10
+ *     File.chmod(0644, "testfile")
+ *     sleep 10
+ *     File.read("testfile")
+ *     File.stat("testfile").birthtime   #=> 2014-02-24 11:19:17 +0900
+ *     File.stat("testfile").mtime       #=> 2014-02-24 11:19:27 +0900
+ *     File.stat("testfile").ctime       #=> 2014-02-24 11:19:37 +0900
+ *     File.stat("testfile").atime       #=> 2014-02-24 11:19:47 +0900
+ *
+ */
+
+static VALUE
+rb_stat_birthtime(VALUE self)
+{
+    return stat_birthtime(get_stat(self));
+}
+#else
+# define rb_stat_birthtime rb_f_notimplement
+#endif
+
 /*
  * call-seq:
  *   stat.inspect  ->  string
@@ -846,7 +928,8 @@ rb_stat_ctime(VALUE self)
  *      #    nlink=1, uid=0, gid=0, rdev=0x0, size=1374, blksize=4096,
  *      #    blocks=8, atime=Wed Dec 10 10:16:12 CST 2003,
  *      #    mtime=Fri Sep 12 15:41:41 CDT 2003,
- *      #    ctime=Mon Oct 27 11:20:27 CST 2003>"
+ *      #    ctime=Mon Oct 27 11:20:27 CST 2003,
+ *      #    birthtime=Mon Aug 04 08:13:49 CDT 2003>"
  */
 
 static VALUE
@@ -871,6 +954,9 @@ rb_stat_inspect(VALUE self)
 	{"atime",   rb_stat_atime},
 	{"mtime",   rb_stat_mtime},
 	{"ctime",   rb_stat_ctime},
+#if defined(HAVE_STRUCT_STAT_ST_BIRTHTIMESPEC)
+	{"birthtime",   rb_stat_birthtime},
+#endif
     };
 
     struct stat* st;
@@ -1089,7 +1175,7 @@ rb_file_lstat(VALUE obj)
 static int
 rb_group_member(GETGROUPS_T gid)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || !defined(HAVE_GETGROUPS)
     return FALSE;
 #else
     int rv = FALSE;
@@ -1139,6 +1225,15 @@ rb_group_member(GETGROUPS_T gid)
 
 #if defined(S_IXGRP) && !defined(_WIN32) && !defined(__CYGWIN__)
 #define USE_GETEUID 1
+#endif
+
+#ifdef __native_client__
+// Although the NaCl toolchain contain eaccess() is it not yet
+// overridden by nacl_io.
+// TODO(sbc): Remove this once eaccess() is wired up correctly
+// in NaCl.
+# undef HAVE_EACCESS
+# undef USE_GETEUID
 #endif
 
 #ifndef HAVE_EACCESS
@@ -1380,7 +1475,6 @@ rb_file_chardev_p(VALUE obj, VALUE fname)
 /*
  * call-seq:
  *    File.exist?(file_name)    ->  true or false
- *    File.exists?(file_name)   ->  true or false
  *
  * Return <code>true</code> if the named file exists.
  *
@@ -1398,6 +1492,12 @@ rb_file_exist_p(VALUE obj, VALUE fname)
     return Qtrue;
 }
 
+/*
+ * call-seq:
+ *    File.exists?(file_name)   ->  true or false
+ *
+ * Deprecated method. Don't use.
+ */
 static VALUE
 rb_file_exists_p(VALUE obj, VALUE fname)
 {
@@ -1596,12 +1696,14 @@ rb_file_executable_real_p(VALUE obj, VALUE fname)
 
 /*
  * call-seq:
- *    File.file?(file_name)   -> true or false
+ *    File.file?(file) -> true or false
  *
- * Returns <code>true</code> if the named file exists and is a
- * regular file.
+ * Returns +true+ if the named +file+ exists and is a regular file.
  *
- * _file_name_ can be an IO object.
+ * +file+ can be an IO object.
+ *
+ * If the +file+ argument is a symbolic link, it will resolve the symbolic link
+ * and use the file referenced by the link.
  */
 
 static VALUE
@@ -2082,6 +2184,65 @@ rb_file_ctime(VALUE obj)
     return stat_ctime(&st);
 }
 
+#if defined(HAVE_STAT_BIRTHTIME)
+/*
+ *  call-seq:
+ *     File.birthtime(file_name)  -> time
+ *
+ *  Returns the birth time for the named file.
+ *
+ *  _file_name_ can be an IO object.
+ *
+ *  Note that on Windows (NTFS), returns creation time (birth time).
+ *
+ *     File.birthtime("testfile")   #=> Wed Apr 09 08:53:13 CDT 2003
+ *
+ */
+
+static VALUE
+rb_file_s_birthtime(VALUE klass, VALUE fname)
+{
+    struct stat st;
+
+    if (rb_stat(fname, &st) < 0) {
+	FilePathValue(fname);
+	rb_sys_fail_path(fname);
+    }
+    return stat_birthtime(&st);
+}
+#else
+# define rb_file_s_birthtime rb_f_notimplement
+#endif
+
+#if defined(HAVE_STAT_BIRTHTIME)
+/*
+ *  call-seq:
+ *     file.birthtime  ->  time
+ *
+ *  Returns the birth time for <i>file</i>.
+ *
+ *  Note that on Windows (NTFS), returns creation time (birth time).
+ *
+ *     File.new("testfile").birthtime   #=> Wed Apr 09 08:53:14 CDT 2003
+ *
+ */
+
+static VALUE
+rb_file_birthtime(VALUE obj)
+{
+    rb_io_t *fptr;
+    struct stat st;
+
+    GetOpenFile(obj, fptr);
+    if (fstat(fptr->fd, &st) == -1) {
+	rb_sys_fail_path(fptr->pathv);
+    }
+    return stat_birthtime(&st);
+}
+#else
+# define rb_file_birthtime rb_f_notimplement
+#endif
+
 /*
  *  call-seq:
  *     file.size    -> integer
@@ -2414,7 +2575,7 @@ utime_internal(const char *path, VALUE pathv, void *arg)
     const struct timespec *tsp = v->tsp;
     struct timeval tvbuf[2], *tvp = NULL;
 
-#ifdef HAVE_UTIMENSAT
+#if defined(HAVE_UTIMENSAT)
     static int try_utimensat = 1;
 
     if (try_utimensat) {
@@ -2974,6 +3135,27 @@ ntfs_tail(const char *path, const char *end, rb_encoding *enc)
     buflen = RSTRING_LEN(result),\
     pend = p + buflen)
 
+#ifdef __APPLE__
+# define SKIPPATHSEP(p) ((*(p)) ? 1 : 0)
+#else
+# define SKIPPATHSEP(p) 1
+#endif
+
+#define BUFCOPY(srcptr, srclen) do { \
+    const int skip = SKIPPATHSEP(p); \
+    rb_str_set_len(result, p-buf+skip); \
+    BUFCHECK(bdiff + ((srclen)+skip) >= buflen); \
+    p += skip; \
+    memcpy(p, (srcptr), (srclen)); \
+    p += (srclen); \
+} while (0)
+
+#define WITH_ROOTDIFF(stmt) do { \
+    long rootdiff = root - buf; \
+    stmt; \
+    root = buf + rootdiff; \
+} while (0)
+
 static VALUE
 copy_home_path(VALUE result, const char *dir)
 {
@@ -3245,17 +3427,25 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 	  case '\\':
 #endif
 	    if (s > b) {
-		long rootdiff = root - buf;
-		rb_str_set_len(result, p-buf+1);
-		BUFCHECK(bdiff + (s-b+1) >= buflen);
-		root = buf + rootdiff;
-		memcpy(++p, b, s-b);
-		p += s-b;
+		WITH_ROOTDIFF(BUFCOPY(b, s-b));
 		*p = '/';
 	    }
 	    b = ++s;
 	    break;
 	  default:
+#ifdef __APPLE__
+	    {
+		int n = ignored_char_p(s, fend, enc);
+		if (n) {
+		    if (s > b) {
+			WITH_ROOTDIFF(BUFCOPY(b, s-b));
+			*p = '\0';
+		    }
+		    b = s += n;
+		    break;
+		}
+	    }
+#endif
 	    Inc(s, fend, enc);
 	    break;
 	}
@@ -3277,10 +3467,7 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 	    }
 	}
 #endif
-	rb_str_set_len(result, p-buf+1);
-	BUFCHECK(bdiff + (s-b) >= buflen);
-	memcpy(++p, b, s-b);
-	p += s-b;
+	BUFCOPY(b, s-b);
 	rb_str_set_len(result, p-buf);
     }
     if (p == skiproot(buf, p + !!*p, enc) - 1) p++;
@@ -3399,6 +3586,16 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 
 #define EXPAND_PATH_BUFFER() rb_usascii_str_new(0, MAXPATHLEN + 2)
 
+static VALUE
+str_shrink(VALUE str)
+{
+    rb_str_resize(str, RSTRING_LEN(str));
+    return str;
+}
+
+#define expand_path(fname, dname, abs_mode, long_name, result) \
+    str_shrink(rb_file_expand_path_internal(fname, dname, abs_mode, long_name, result))
+
 #define check_expand_path_args(fname, dname) \
     (((fname) = rb_get_path(fname)), \
      (void)(NIL_P(dname) ? (dname) : ((dname) = rb_get_path(dname))))
@@ -3413,13 +3610,13 @@ VALUE
 rb_file_expand_path(VALUE fname, VALUE dname)
 {
     check_expand_path_args(fname, dname);
-    return rb_file_expand_path_internal(fname, dname, 0, 1, EXPAND_PATH_BUFFER());
+    return expand_path(fname, dname, 0, 1, EXPAND_PATH_BUFFER());
 }
 
 VALUE
 rb_file_expand_path_fast(VALUE fname, VALUE dname)
 {
-    return rb_file_expand_path_internal(fname, dname, 0, 0, EXPAND_PATH_BUFFER());
+    return expand_path(fname, dname, 0, 0, EXPAND_PATH_BUFFER());
 }
 
 /*
@@ -3451,7 +3648,7 @@ rb_file_expand_path_fast(VALUE fname, VALUE dname)
  */
 
 VALUE
-rb_file_s_expand_path(int argc, VALUE *argv)
+rb_file_s_expand_path(int argc, const VALUE *argv)
 {
     VALUE fname, dname;
 
@@ -3467,7 +3664,7 @@ VALUE
 rb_file_absolute_path(VALUE fname, VALUE dname)
 {
     check_expand_path_args(fname, dname);
-    return rb_file_expand_path_internal(fname, dname, 1, 1, EXPAND_PATH_BUFFER());
+    return expand_path(fname, dname, 1, 1, EXPAND_PATH_BUFFER());
 }
 
 /*
@@ -3484,7 +3681,7 @@ rb_file_absolute_path(VALUE fname, VALUE dname)
  */
 
 VALUE
-rb_file_s_absolute_path(int argc, VALUE *argv)
+rb_file_s_absolute_path(int argc, const VALUE *argv)
 {
     VALUE fname, dname;
 
@@ -4173,7 +4370,7 @@ rb_file_join(VALUE ary, VALUE sep)
 
 /*
  *  call-seq:
- *     File.join(string, ...)  ->  path
+ *     File.join(string, ...)  ->  string
  *
  *  Returns a new string formed by joining the strings using
  *  <code>File::SEPARATOR</code>.
@@ -4412,7 +4609,6 @@ rb_file_flock(VALUE obj, VALUE operation)
     }
     return INT2FIX(0);
 }
-#undef flock
 
 static void
 test_check(int n, int argc, VALUE *argv)
@@ -4518,7 +4714,6 @@ rb_f_test(int argc, VALUE *argv)
 	  case 'd':
 	    return rb_file_directory_p(0, argv[1]);
 
-	  case 'a':
 	  case 'e':
 	    return rb_file_exist_p(0, argv[1]);
 
@@ -5378,9 +5573,6 @@ rb_path_check(const char *path)
 }
 
 #ifndef _WIN32
-#ifdef __native_client__
-__attribute__((noinline))
-#endif
 int
 rb_file_load_ok(const char *path)
 {
@@ -5412,6 +5604,7 @@ is_explicit_relative(const char *path)
 static VALUE
 copy_path_class(VALUE path, VALUE orig)
 {
+    str_shrink(path);
     RBASIC_SET_CLASS(path, rb_obj_class(orig));
     OBJ_FREEZE(path);
     return path;
@@ -5484,6 +5677,7 @@ rb_find_file_ext_safe(VALUE *filep, const char *const *ext, int safe_level)
 	}
 	rb_str_set_len(fname, fnlen);
     }
+    rb_str_resize(tmp, 0);
     RB_GC_GUARD(load_path);
     return 0;
 }
@@ -5536,6 +5730,7 @@ rb_find_file_safe(VALUE path, int safe_level)
 		if (rb_file_load_ok(f)) goto found;
 	    }
 	}
+	rb_str_resize(tmp, 0);
 	return 0;
     }
     else {
@@ -5647,6 +5842,7 @@ Init_File(void)
     rb_define_singleton_method(rb_cFile, "atime", rb_file_s_atime, 1);
     rb_define_singleton_method(rb_cFile, "mtime", rb_file_s_mtime, 1);
     rb_define_singleton_method(rb_cFile, "ctime", rb_file_s_ctime, 1);
+    rb_define_singleton_method(rb_cFile, "birthtime", rb_file_s_birthtime, 1);
 
     rb_define_singleton_method(rb_cFile, "utime", rb_file_s_utime, -1);
     rb_define_singleton_method(rb_cFile, "chmod", rb_file_s_chmod, -1);
@@ -5694,6 +5890,7 @@ Init_File(void)
     rb_define_method(rb_cFile, "atime", rb_file_atime, 0);
     rb_define_method(rb_cFile, "mtime", rb_file_mtime, 0);
     rb_define_method(rb_cFile, "ctime", rb_file_ctime, 0);
+    rb_define_method(rb_cFile, "birthtime", rb_file_birthtime, 0);
     rb_define_method(rb_cFile, "size", rb_file_size, 0);
 
     rb_define_method(rb_cFile, "chmod", rb_file_chmod, 1);
@@ -5815,6 +6012,7 @@ Init_File(void)
     rb_define_method(rb_cStat, "atime", rb_stat_atime, 0);
     rb_define_method(rb_cStat, "mtime", rb_stat_mtime, 0);
     rb_define_method(rb_cStat, "ctime", rb_stat_ctime, 0);
+    rb_define_method(rb_cStat, "birthtime", rb_stat_birthtime, 0);
 
     rb_define_method(rb_cStat, "inspect", rb_stat_inspect, 0);
 

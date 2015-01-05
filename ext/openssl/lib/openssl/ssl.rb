@@ -64,6 +64,7 @@ module OpenSSL
           opts |= OpenSSL::SSL::OP_NO_COMPRESSION if defined?(OpenSSL::SSL::OP_NO_COMPRESSION)
           opts |= OpenSSL::SSL::OP_NO_SSLv2 if defined?(OpenSSL::SSL::OP_NO_SSLv2)
           opts |= OpenSSL::SSL::OP_NO_SSLv3 if defined?(OpenSSL::SSL::OP_NO_SSLv3)
+          opts
         }.call
       }
 
@@ -225,14 +226,21 @@ module OpenSSL
 
       # Works similar to TCPServer#accept.
       def accept
-        sock = @svr.accept
+        # Socket#accept returns [socket, addrinfo].
+        # TCPServer#accept returns a socket.
+        # The following comma strips addrinfo.
+        sock, = @svr.accept
         begin
           ssl = OpenSSL::SSL::SSLSocket.new(sock, @ctx)
           ssl.sync_close = true
           ssl.accept if @start_immediately
           ssl
-        rescue SSLError => ex
-          sock.close
+        rescue Exception => ex
+          if ssl
+            ssl.close
+          else
+            sock.close
+          end
           raise ex
         end
       end

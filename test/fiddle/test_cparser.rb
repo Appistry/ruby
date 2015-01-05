@@ -59,6 +59,14 @@ module Fiddle
       assert_equal(TYPE_UINTPTR_T, parse_ctype("uintptr_t"))
     end
 
+    def test_undefined_ctype
+      assert_raises(DLError) { parse_ctype('DWORD') }
+    end
+
+    def test_undefined_ctype_with_type_alias
+      assert_equal(-TYPE_LONG, parse_ctype('DWORD', {"DWORD" => "unsigned long"}))
+    end
+
     def test_struct_basic
       assert_equal [[TYPE_INT, TYPE_CHAR], ['i', 'c']], parse_struct_signature(['int i', 'char c'])
     end
@@ -83,6 +91,17 @@ module Fiddle
       assert_equal [[TYPE_INT,TYPE_VOIDP,TYPE_VOIDP], ['x', 'cb', 'name']], parse_struct_signature('int x; void (*cb)(); const char* name')
     end
 
+<<<<<<< HEAD
+=======
+    def test_struct_undefined
+      assert_raises(DLError) { parse_struct_signature(['int i', 'DWORD cb']) }
+    end
+
+    def test_struct_undefined_with_type_alias
+      assert_equal [[TYPE_INT,-TYPE_LONG], ['i', 'cb']], parse_struct_signature(['int i', 'DWORD cb'], {"DWORD" => "unsigned long"})
+    end
+
+>>>>>>> 64e2406427a7126d7d04b018149b10535670ed84
     def test_signature_basic
       func, ret, args = parse_signature('void func()')
       assert_equal 'func', func

@@ -9,11 +9,9 @@
 
 **********************************************************************/
 
-#include "ruby/ruby.h"
-#include "ruby/re.h"
-#include "ruby/encoding.h"
-#include "ruby/util.h"
 #include "internal.h"
+#include "ruby/re.h"
+#include "ruby/util.h"
 #include "regint.h"
 #include <ctype.h>
 
@@ -872,10 +870,20 @@ match_alloc(VALUE klass)
     match->str = 0;
     match->rmatch = 0;
     match->regexp = 0;
-    match->rmatch = ALLOC(struct rmatch);
-    MEMZERO(match->rmatch, struct rmatch, 1);
+    match->rmatch = ZALLOC(struct rmatch);
 
     return (VALUE)match;
+}
+
+int
+rb_reg_region_copy(struct re_registers *to, const struct re_registers *from)
+{
+    onig_region_copy(to, (OnigRegion *)from);
+    if (to->allocated) return 0;
+    rb_gc();
+    onig_region_copy(to, (OnigRegion *)from);
+    if (to->allocated) return 0;
+    return ONIGERR_MEMORY;
 }
 
 typedef struct {
@@ -985,7 +993,8 @@ match_init_copy(VALUE obj, VALUE orig)
     RMATCH(obj)->regexp = RMATCH(orig)->regexp;
 
     rm = RMATCH(obj)->rmatch;
-    onig_region_copy(&rm->regs, RMATCH_REGS(orig));
+    if (rb_reg_region_copy(&rm->regs, RMATCH_REGS(orig)))
+	rb_memerror();
 
     if (!RMATCH(orig)->rmatch->char_offset_updated) {
         rm->char_offset_updated = 0;
@@ -998,6 +1007,7 @@ match_init_copy(VALUE obj, VALUE orig)
         MEMCPY(rm->char_offset, RMATCH(orig)->rmatch->char_offset,
                struct rmatch_offset, rm->regs.num_regs);
         rm->char_offset_updated = 1;
+	RB_GC_GUARD(orig);
     }
 
     return obj;
@@ -1083,8 +1093,8 @@ match_backref_number(VALUE match, VALUE backref)
         return NUM2INT(backref);
 
       case T_SYMBOL:
-        name = rb_id2name(SYM2ID(backref));
-        break;
+	backref = rb_sym2str(backref);
+	/* fall through */
 
       case T_STRING:
         name = StringValueCStr(backref);
@@ -1472,9 +1482,11 @@ rb_reg_search0(VALUE re, VALUE str, long pos, int reverse, int set_backref_str)
     }
 
     if (NIL_P(match)) {
+	int err;
 	match = match_alloc(rb_cMatch);
-	onig_region_copy(RMATCH_REGS(match), regs);
+	err = rb_reg_region_copy(RMATCH_REGS(match), regs);
 	onig_region_free(regs, 0);
+	if (err) rb_memerror();
     }
     else {
 	if (rb_safe_level() >= 3)
@@ -1733,20 +1745,16 @@ match_captures(VALUE match)
 static int
 name_to_backref_number(struct re_registers *regs, VALUE regexp, const char* name, const char* name_end)
 {
-    int num;
-
-    num = onig_name_to_backref_number(RREGEXP(regexp)->ptr,
+    return onig_name_to_backref_number(RREGEXP(regexp)->ptr,
 	(const unsigned char* )name, (const unsigned char* )name_end, regs);
-    if (num >= 1) {
-	return num;
-    }
-    else {
-	VALUE s = rb_str_new(name, (long )(name_end - name));
-	rb_raise(rb_eIndexError, "undefined group name reference: %s",
-				 StringValuePtr(s));
-    }
+}
 
-    UNREACHABLE;
+NORETURN(static void name_to_backref_error(VALUE name));
+static void
+name_to_backref_error(VALUE name)
+{
+    rb_raise(rb_eIndexError, "undefined group name reference: % "PRIsVALUE,
+	     name);
 }
 
 /*
@@ -1796,17 +1804,16 @@ match_aref(int argc, VALUE *argv, VALUE match)
 
 	    switch (TYPE(idx)) {
 	      case T_SYMBOL:
-		p = rb_id2name(SYM2ID(idx));
-		goto name_to_backref;
-		break;
+		idx = rb_sym2str(idx);
+		/* fall through */
 	      case T_STRING:
 		p = StringValuePtr(idx);
-
-	      name_to_backref:
-		num = name_to_backref_number(RMATCH_REGS(match),
-					     RMATCH(match)->regexp, p, p + strlen(p));
+		if (!rb_enc_compatible(RREGEXP(RMATCH(match)->regexp)->src, idx) ||
+		    (num = name_to_backref_number(RMATCH_REGS(match), RMATCH(match)->regexp,
+						  p, p + RSTRING_LEN(idx))) < 1) {
+		    name_to_backref_error(idx);
+		}
 		return rb_reg_nth_match(num, match);
-		break;
 
 	      default:
 		break;
@@ -2290,8 +2297,16 @@ unescape_nonascii(const char *p, const char *end, rb_encoding *enc,
               case 'C': /* \C-X, \C-\M-X */
               case 'M': /* \M-X, \M-\C-X, \M-\cX */
                 p = p-2;
-                if (unescape_escaped_nonascii(&p, end, enc, buf, encp, err) != 0)
-                    return -1;
+		if (enc == rb_usascii_encoding()) {
+		    const char *pbeg = p;
+		    c = read_escaped_byte(&p, end, err);
+		    if (c == (char)-1) return -1;
+		    rb_str_buf_cat(buf, pbeg, p-pbeg);
+		}
+		else {
+		    if (unescape_escaped_nonascii(&p, end, enc, buf, encp, err) != 0)
+			return -1;
+		}
                 break;
 
               case 'u':
@@ -3422,7 +3437,12 @@ rb_reg_regsub(VALUE str, VALUE src, struct re_registers *regs, VALUE regexp)
                     name_end += c == -1 ? mbclen(name_end, e, str_enc) : clen;
                 }
                 if (name_end < e) {
-                    no = name_to_backref_number(regs, regexp, name, name_end);
+		    VALUE n = rb_str_subseq(str, (long)(name - RSTRING_PTR(str)),
+					    (long)(name_end - name));
+		    if (!rb_enc_compatible(RREGEXP(regexp)->src, n) ||
+			(no = name_to_backref_number(regs, regexp, name, name_end)) < 1) {
+			name_to_backref_error(n);
+		    }
                     p = s = name_end + clen;
                     break;
                 }

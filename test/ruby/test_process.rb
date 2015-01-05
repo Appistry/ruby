@@ -1,7 +1,7 @@
 require 'test/unit'
 require 'tempfile'
 require 'timeout'
-require_relative 'envutil'
+require 'io/wait'
 require 'rbconfig'
 
 class TestProcess < Test::Unit::TestCase
@@ -65,8 +65,11 @@ class TestProcess < Test::Unit::TestCase
     return unless rlimit_exist?
     with_tmpchdir {
       write_file 's', <<-"End"
-	# if limit=0, this test freeze pn OpenBSD
-	limit = /openbsd/ =~ RUBY_PLATFORM ? 1 : 0
+        # Too small RLIMIT_NOFILE, such as zero, causes problems.
+        # [OpenBSD] Setting to zero freezes this test.
+        # [GNU/Linux] EINVAL on poll().  EINVAL on ruby's internal poll() ruby with "[ASYNC BUG] thread_timer: select".
+        pipes = IO.pipe
+	limit = pipes.map {|io| io.fileno }.min
 	result = 1
 	begin
 	  Process.setrlimit(Process::RLIMIT_NOFILE, limit)
@@ -458,7 +461,7 @@ class TestProcess < Test::Unit::TestCase
   SORT = [RUBY, '-e', "puts ARGF.readlines.sort"]
   CAT = [RUBY, '-e', "IO.copy_stream STDIN, STDOUT"]
 
-  def test_execopts_redirect
+  def test_execopts_redirect_fd
     with_tmpchdir {|d|
       Process.wait Process.spawn(*ECHO["a"], STDOUT=>["out", File::WRONLY|File::CREAT|File::TRUNC, 0644])
       assert_equal("a", File.read("out").chomp)
@@ -530,76 +533,82 @@ class TestProcess < Test::Unit::TestCase
       assert_equal("bb\naa\n", File.read("out"))
       system(*SORT, STDIN=>["out"], STDOUT=>"out2")
       assert_equal("aa\nbb\n", File.read("out2"))
+    }
+  end
 
-      with_pipe {|r1, w1|
-        with_pipe {|r2, w2|
-          opts = {STDIN=>r1, STDOUT=>w2}
-          opts.merge(w1=>:close, r2=>:close) unless windows?
-          pid = spawn(*SORT, opts)
-          r1.close
-          w2.close
-          w1.puts "c"
-          w1.puts "a"
-          w1.puts "b"
-          w1.close
-          assert_equal("a\nb\nc\n", r2.read)
-          r2.close
-          Process.wait(pid)
+  def test_execopts_redirect_pipe
+    with_pipe {|r1, w1|
+      with_pipe {|r2, w2|
+        opts = {STDIN=>r1, STDOUT=>w2}
+        opts.merge(w1=>:close, r2=>:close) unless windows?
+        pid = spawn(*SORT, opts)
+        r1.close
+        w2.close
+        w1.puts "c"
+        w1.puts "a"
+        w1.puts "b"
+        w1.close
+        assert_equal("a\nb\nc\n", r2.read)
+        r2.close
+        Process.wait(pid)
+      }
+    }
+
+    unless windows?
+      # passing non-stdio fds is not supported on Windows
+      with_pipes(5) {|pipes|
+        ios = pipes.flatten
+        h = {}
+        ios.length.times {|i| h[ios[i]] = ios[(i-1)%ios.length] }
+        h2 = h.invert
+        _rios = pipes.map {|r, w| r }
+        wios  = pipes.map {|r, w| w }
+        child_wfds = wios.map {|w| h2[w].fileno }
+        pid = spawn(RUBY, "-e",
+                    "[#{child_wfds.join(',')}].each {|fd| IO.new(fd, 'w').puts fd }", h)
+        pipes.each {|r, w|
+          assert_equal("#{h2[w].fileno}\n", r.gets)
         }
+        Process.wait pid;
       }
 
-      unless windows?
-        # passing non-stdio fds is not supported on Windows
-        with_pipes(5) {|pipes|
-          ios = pipes.flatten
-          h = {}
-          ios.length.times {|i| h[ios[i]] = ios[(i-1)%ios.length] }
-          h2 = h.invert
-          _rios = pipes.map {|r, w| r }
-          wios  = pipes.map {|r, w| w }
-          child_wfds = wios.map {|w| h2[w].fileno }
-          pid = spawn(RUBY, "-e",
-                  "[#{child_wfds.join(',')}].each {|fd| IO.new(fd, 'w').puts fd }", h)
-          pipes.each {|r, w|
-            assert_equal("#{h2[w].fileno}\n", r.gets)
-          }
-          Process.wait pid;
+      with_pipes(5) {|pipes|
+        ios = pipes.flatten
+        h = {}
+        ios.length.times {|i| h[ios[i]] = ios[(i+1)%ios.length] }
+        h2 = h.invert
+        _rios = pipes.map {|r, w| r }
+        wios  = pipes.map {|r, w| w }
+        child_wfds = wios.map {|w| h2[w].fileno }
+        pid = spawn(RUBY, "-e",
+                    "[#{child_wfds.join(',')}].each {|fd| IO.new(fd, 'w').puts fd }", h)
+        pipes.each {|r, w|
+          assert_equal("#{h2[w].fileno}\n", r.gets)
         }
+        Process.wait pid
+      }
 
-        with_pipes(5) {|pipes|
-          ios = pipes.flatten
-          h = {}
-          ios.length.times {|i| h[ios[i]] = ios[(i+1)%ios.length] }
-          h2 = h.invert
-          _rios = pipes.map {|r, w| r }
-          wios  = pipes.map {|r, w| w }
-          child_wfds = wios.map {|w| h2[w].fileno }
-          pid = spawn(RUBY, "-e",
-                  "[#{child_wfds.join(',')}].each {|fd| IO.new(fd, 'w').puts fd }", h)
-          pipes.each {|r, w|
-            assert_equal("#{h2[w].fileno}\n", r.gets)
-          }
+      closed_fd = nil
+      with_pipes(5) {|pipes|
+        io = pipes.last.last
+        closed_fd = io.fileno
+      }
+      assert_raise(Errno::EBADF) { Process.wait spawn(*TRUECOMMAND, closed_fd=>closed_fd) }
+
+      with_pipe {|r, w|
+        if w.respond_to?(:"close_on_exec=")
+          w.close_on_exec = true
+          pid = spawn(RUBY, "-e", "IO.new(#{w.fileno}, 'w').print 'a'", w=>w)
+          w.close
+          assert_equal("a", r.read)
           Process.wait pid
-        }
+        end
+      }
+    end
+  end
 
-        closed_fd = nil
-        with_pipes(5) {|pipes|
-          io = pipes.last.last
-          closed_fd = io.fileno
-        }
-        assert_raise(Errno::EBADF) { Process.wait spawn(*TRUECOMMAND, closed_fd=>closed_fd) }
-
-        with_pipe {|r, w|
-          if w.respond_to?(:"close_on_exec=")
-            w.close_on_exec = true
-            pid = spawn(RUBY, "-e", "IO.new(#{w.fileno}, 'w').print 'a'", w=>w)
-            w.close
-            assert_equal("a", r.read)
-            Process.wait pid
-          end
-        }
-      end
-
+  def test_execopts_redirect_symbol
+    with_tmpchdir {|d|
       system(*ECHO["funya"], :out=>"out")
       assert_equal("funya\n", File.read("out"))
       system(RUBY, '-e', 'STDOUT.reopen(STDERR); puts "henya"', :err=>"out")
@@ -607,6 +616,27 @@ class TestProcess < Test::Unit::TestCase
       IO.popen([*CAT, :in=>"out"]) {|io|
         assert_equal("henya\n", io.read)
       }
+    }
+  end
+
+  def test_execopts_redirect_nonascii_path
+    bug9946 = '[ruby-core:63185] [Bug #9946]'
+    with_tmpchdir {|d|
+      path = "t-\u{30c6 30b9 30c8 f6}.txt"
+      system(*ECHO["a"], out: path)
+      assert_file.for(bug9946).exist?(path)
+      assert_equal("a\n", File.read(path), bug9946)
+    }
+  end
+
+  def test_execopts_redirect_to_out_and_err
+    with_tmpchdir {|d|
+      ret = system(RUBY, "-e", 'STDERR.print "e"; STDOUT.print "o"', [:out, :err] => "foo")
+      assert_equal(true, ret)
+      assert_equal("eo", File.read("foo"))
+      ret = system(RUBY, "-e", 'STDERR.print "E"; STDOUT.print "O"', [:err, :out] => "bar")
+      assert_equal(true, ret)
+      assert_equal("EO", File.read("bar"))
     }
   end
 
@@ -719,11 +749,14 @@ class TestProcess < Test::Unit::TestCase
     }
     with_pipe {|r, w|
       io = IO.popen([RUBY, "-e", "STDERR.reopen(STDOUT); IO.new(#{w.fileno}, 'w').puts('me')"])
-      w.close
-      errmsg = io.read
-      assert_equal("", r.read)
-      assert_not_equal("", errmsg)
-      Process.wait
+      begin
+        w.close
+        errmsg = io.read
+        assert_equal("", r.read)
+        assert_not_equal("", errmsg)
+      ensure
+        io.close
+      end
     }
     with_pipe {|r, w|
       errmsg = `#{RUBY} -e "STDERR.reopen(STDOUT); IO.new(#{w.fileno}, 'w').puts(123)"`
@@ -771,29 +804,38 @@ class TestProcess < Test::Unit::TestCase
       }
       with_pipe {|r, w|
         io = IO.popen([RUBY, "-e", "STDERR.reopen(STDOUT); IO.new(#{w.fileno}, 'w').puts('me')", :close_others=>true])
-        w.close
-        errmsg = io.read
-        assert_equal("", r.read)
-        assert_not_equal("", errmsg)
-        Process.wait
+        begin
+          w.close
+          errmsg = io.read
+          assert_equal("", r.read)
+          assert_not_equal("", errmsg)
+        ensure
+          io.close
+        end
       }
       with_pipe {|r, w|
         w.close_on_exec = false
         io = IO.popen([RUBY, "-e", "STDERR.reopen(STDOUT); IO.new(#{w.fileno}, 'w').puts('mo')", :close_others=>false])
-        w.close
-        errmsg = io.read
-        assert_equal("mo\n", r.read)
-        assert_equal("", errmsg)
-        Process.wait
+        begin
+          w.close
+          errmsg = io.read
+          assert_equal("mo\n", r.read)
+          assert_equal("", errmsg)
+        ensure
+          io.close
+        end
       }
       with_pipe {|r, w|
         w.close_on_exec = false
         io = IO.popen([RUBY, "-e", "STDERR.reopen(STDOUT); IO.new(#{w.fileno}, 'w').puts('mo')", :close_others=>nil])
-        w.close
-        errmsg = io.read
-        assert_equal("mo\n", r.read)
-        assert_equal("", errmsg)
-        Process.wait
+        begin
+          w.close
+          errmsg = io.read
+          assert_equal("mo\n", r.read)
+          assert_equal("", errmsg)
+        ensure
+          io.close
+        end
       }
 
     }
@@ -1117,8 +1159,7 @@ class TestProcess < Test::Unit::TestCase
       Process.wait spawn([RUBY, "poiu"], "-e", "exit 4")
       assert_equal(4, $?.exitstatus)
 
-      assert_equal("1", IO.popen([[RUBY, "qwerty"], "-e", "print 1"]).read)
-      Process.wait
+      assert_equal("1", IO.popen([[RUBY, "qwerty"], "-e", "print 1"]) {|f| f.read })
 
       write_file("s", <<-"End")
         exec([#{RUBY.dump}, "lkjh"], "-e", "exit 5")
@@ -1187,6 +1228,23 @@ class TestProcess < Test::Unit::TestCase
 
   def test_status_kill
     return unless Process.respond_to?(:kill)
+    return unless Signal.list.include?("KILL")
+
+    # assume the system supports signal if SIGQUIT is available
+    expected = Signal.list.include?("QUIT") ? [false, true, false, nil] : [true, false, false, true]
+
+    with_tmpchdir do
+      write_file("foo", "Process.kill(:KILL, $$); exit(42)")
+      system(RUBY, "foo")
+      s = $?
+      assert_equal(expected,
+                   [s.exited?, s.signaled?, s.stopped?, s.success?],
+                   "[s.exited?, s.signaled?, s.stopped?, s.success?]")
+    end
+  end
+
+  def test_status_quit
+    return unless Process.respond_to?(:kill)
     return unless Signal.list.include?("QUIT")
 
     with_tmpchdir do
@@ -1195,21 +1253,20 @@ class TestProcess < Test::Unit::TestCase
       IO.pipe do |r, w|
         pid = spawn(RUBY, "foo", out: w)
         w.close
-        Thread.new { r.read(1); Process.kill(:SIGQUIT, pid) }
+        th = Thread.new { r.read(1); Process.kill(:SIGQUIT, pid) }
         Process.wait(pid)
+        th.join
       end
       t = Time.now
       s = $?
-      assert_equal([false, true, false],
-                   [s.exited?, s.signaled?, s.stopped?],
-                   "[s.exited?, s.signaled?, s.stopped?]")
+      assert_equal([false, true, false, nil],
+                   [s.exited?, s.signaled?, s.stopped?, s.success?],
+                   "[s.exited?, s.signaled?, s.stopped?, s.success?]")
       assert_send(
         [["#<Process::Status: pid #{ s.pid } SIGQUIT (signal #{ s.termsig })>",
           "#<Process::Status: pid #{ s.pid } SIGQUIT (signal #{ s.termsig }) (core dumped)>"],
          :include?,
          s.inspect])
-      assert_equal(false, s.exited?)
-      assert_equal(nil, s.success?)
       EnvUtil.diagnostic_reports("QUIT", RUBY, pid, t)
     end
   end
@@ -1625,9 +1682,9 @@ class TestProcess < Test::Unit::TestCase
   def test_setsid
     return unless Process.respond_to?(:setsid)
     return unless Process.respond_to?(:getsid)
-    # OpenBSD doesn't allow Process::getsid(pid) when pid is in
+    # OpenBSD and AIX don't allow Process::getsid(pid) when pid is in
     # different session.
-    return if /openbsd/ =~ RUBY_PLATFORM
+    return if /openbsd|aix/ =~ RUBY_PLATFORM
 
     IO.popen([RUBY, "-e", <<EOS]) do|io|
 	Marshal.dump(Process.getsid, STDOUT)
@@ -1867,51 +1924,77 @@ EOS
   end
 
   def test_deadlock_by_signal_at_forking
-    ruby = EnvUtil.rubybin
-    er, ew = IO.pipe
-    unless runner = IO.popen("-")
-      er.close
+    assert_separately([], <<-INPUT, timeout: 60)
+      require 'io/wait'
       begin
-        $stderr.reopen($stdout)
-        trap(:QUIT) {}
-        100.times do |i|
-          pid = fork {Process.kill(:QUIT, Process.ppid)}
-          IO.popen(ruby, 'r+'){}
-          Process.wait(pid)
-          $stdout.puts
-          $stdout.flush
+        GC.start # reduce garbage
+        buf = ''
+        ruby = EnvUtil.rubybin
+        er, ew = IO.pipe
+        unless runner = IO.popen("-".freeze)
+          er.close
+          status = true
+          GC.disable # avoid triggering CoW after forks
+          begin
+            $stderr.reopen($stdout)
+            trap(:QUIT) {}
+            parent = $$
+            100.times do |i|
+              pid = fork {Process.kill(:QUIT, parent)}
+              IO.popen(ruby, 'r+'.freeze){}
+              Process.wait(pid)
+              $stdout.puts
+              $stdout.flush
+            end
+          ensure
+            if $!
+              ew.puts([Marshal.dump($!)].pack("m0"))
+              status = false
+            end
+            ew.close
+            exit!(status)
+          end
         end
-      ensure
-        ew.puts([Marshal.dump($!)].pack("m0")) if $!
         ew.close
-      end
-      exit!(true)
-    end
-    ew.close
-    begin
-      loop do
-        Timeout.timeout(5) do
-          runner.readpartial(100)
+        begin
+          loop do
+            runner.wait_readable(5)
+            runner.read_nonblock(100, buf)
+          end
+        rescue EOFError => e
+          _, status = Process.wait2(runner.pid)
+        rescue IO::WaitReadable => e
+          Process.kill(:INT, runner.pid)
+          exc = Marshal.load(er.read.unpack("m")[0])
+          if exc.kind_of? Interrupt
+            # Don't raise Interrupt.  It aborts test-all.
+            flunk "timeout"
+          else
+            raise exc
+          end
+        end
+        assert_predicate(status, :success?)
+      ensure
+        er.close unless er.closed?
+        ew.close unless ew.closed?
+        if runner
+          begin
+            Process.kill(:TERM, runner.pid)
+            sleep 1
+            Process.kill(:KILL, runner.pid)
+          rescue Errno::ESRCH
+          end
+          runner.close
         end
       end
-    rescue EOFError => e
-      _, status = Process.wait2(runner.pid)
-    rescue Timeout::Error => e
-      Process.kill(:INT, runner.pid)
-      raise Marshal.load(er.read.unpack("m")[0])
-    end
-    assert_predicate(status, :success?)
-  ensure
-    er.close unless er.closed?
-    ew.close unless ew.closed?
-    if runner
-      begin
-        Process.kill(:TERM, runner.pid)
-        sleep 1
-        Process.kill(:KILL, runner.pid)
-      rescue Errno::ESRCH
-      end
-      runner.close
-    end
+    INPUT
+  end if defined?(fork)
+
+  def test_process_detach
+    pid = fork {}
+    th = Process.detach(pid)
+    assert_equal pid, th.pid
+    status = th.value
+    assert status.success?, status.inspect
   end if defined?(fork)
 end

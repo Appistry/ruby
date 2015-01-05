@@ -1,5 +1,4 @@
 require 'test/unit'
-require_relative 'envutil'
 
 class TestNumeric < Test::Unit::TestCase
   class DummyNumeric < Numeric
@@ -58,6 +57,23 @@ class TestNumeric < Test::Unit::TestCase
       def coerce(x); [x, 1]; end
     end
     assert_equal(-1, -a)
+
+    bug7688 = '[ruby-core:51389] [Bug #7688]'
+    DummyNumeric.class_eval do
+      remove_method :coerce
+      def coerce(x); raise StandardError; end
+    end
+    assert_raise_with_message(TypeError, /can't be coerced into /) { 1 + a }
+    warn = /will no more rescue exceptions of #coerce.+ in the next release/m
+    assert_warn(warn, bug7688) { assert_raise(ArgumentError) { 1 < a } }
+
+    DummyNumeric.class_eval do
+      remove_method :coerce
+      def coerce(x); :bad_return_value; end
+    end
+    assert_raise_with_message(TypeError, "coerce must return [x, y]") { 1 + a }
+    warn = /Bad return value for #coerce.+next release will raise an error/m
+    assert_warn(warn, bug7688) { assert_raise(ArgumentError) { 1 < a } }
 
   ensure
     DummyNumeric.class_eval do
@@ -267,6 +283,14 @@ class TestNumeric < Test::Unit::TestCase
     assert_nothing_raised { 1.step(by: 0).size }
     assert_nothing_raised { 1.step(by: nil) }
     assert_nothing_raised { 1.step(by: nil).size }
+
+    bug9811 = '[ruby-dev:48177] [Bug #9811]'
+    assert_raise(ArgumentError, bug9811) { 1.step(10, foo: nil) {} }
+    assert_raise(ArgumentError, bug9811) { 1.step(10, foo: nil).size }
+    assert_raise(ArgumentError, bug9811) { 1.step(10, to: 11) {} }
+    assert_raise(ArgumentError, bug9811) { 1.step(10, to: 11).size }
+    assert_raise(ArgumentError, bug9811) { 1.step(10, 1, by: 11) {} }
+    assert_raise(ArgumentError, bug9811) { 1.step(10, 1, by: 11).size }
 
     assert_equal(bignum*2+1, (-bignum).step(bignum, 1).size)
     assert_equal(bignum*2, (-bignum).step(bignum-1, 1).size)

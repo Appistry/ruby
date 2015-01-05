@@ -1,6 +1,5 @@
 # coding: US-ASCII
 require 'test/unit'
-require_relative 'envutil'
 
 class TestM17N < Test::Unit::TestCase
   def assert_encoding(encname, actual, message=nil)
@@ -261,6 +260,14 @@ class TestM17N < Test::Unit::TestCase
     end
   end
 
+  def test_utf_without_bom_asciionly
+    bug10598 = '[ruby-core:66835] [Bug #10598]'
+    encs = [Encoding::UTF_16, Encoding::UTF_32].find_all {|enc|
+      "abcd".force_encoding(enc).ascii_only?
+    }
+    assert_empty(encs, bug10598)
+  end
+
   def test_object_utf16_32_inspect
     EnvUtil.suppress_warning do
       begin
@@ -479,6 +486,9 @@ class TestM17N < Test::Unit::TestCase
     assert_regexp_fixed_ascii8bit(eval(a(%{/\xc2\xa1/})))
     assert_regexp_fixed_ascii8bit(eval(a(%{/\xc2\xa1/n})))
     assert_regexp_fixed_ascii8bit(eval(a(%q{/\xc2\xa1/})))
+
+    s = '\xc2\xa1'
+    assert_regexp_fixed_ascii8bit(/#{s}/)
 
     assert_raise(SyntaxError) { eval("/\xa1\xa1/n".force_encoding("euc-jp")) }
 
@@ -1037,6 +1047,11 @@ class TestM17N < Test::Unit::TestCase
     assert_raise(Encoding::CompatibilityError){s.count(a("\xa3\xb0"))}
   end
 
+  def test_count_sjis_trailing_byte
+    bug10078 = '[ruby-dev:48442] [Bug #10078]'
+    assert_equal(0, s("\x98\x61").count("a"), bug10078)
+  end
+
   def test_delete
     assert_equal(1, e("\xa1\xa2").delete("z").length)
     s = e("\xa3\xb0\xa3\xb1\xa3\xb2\xa3\xb3\xa3\xb4")
@@ -1503,13 +1518,20 @@ class TestM17N < Test::Unit::TestCase
     assert_equal(true, s.b.ascii_only?)
   end
 
-  def test_scrub
+  def test_scrub_valid_string
+    str = "foo"
+    assert_equal(str, str.scrub)
+    assert_not_same(str, str.scrub)
     str = "\u3042\u3044"
+    assert_equal(str, str.scrub)
     assert_not_same(str, str.scrub)
     str.force_encoding(Encoding::ISO_2022_JP) # dummy encoding
+    assert_equal(str, str.scrub)
     assert_not_same(str, str.scrub)
     assert_nothing_raised(ArgumentError) {str.scrub(nil)}
+  end
 
+  def test_scrub_replace_default
     assert_equal("\uFFFD\uFFFD\uFFFD", u("\x80\x80\x80").scrub)
     assert_equal("\uFFFDA", u("\xF4\x80\x80A").scrub)
 
@@ -1522,13 +1544,18 @@ class TestM17N < Test::Unit::TestCase
                  u("\x61\xF1\x80\x80\xE1\x80\xC2\x62\x80\x63\x80\xBF\x64").scrub)
     assert_equal("abcdefghijklmnopqrstuvwxyz\u0061\uFFFD\uFFFD\uFFFD\u0062\uFFFD\u0063\uFFFD\uFFFD\u0064",
                  u("abcdefghijklmnopqrstuvwxyz\x61\xF1\x80\x80\xE1\x80\xC2\x62\x80\x63\x80\xBF\x64").scrub)
+  end
 
+  def test_scrub_replace_argument
+    assert_equal("foo", u("foo").scrub("\u3013"))
     assert_equal("\u3042\u3013", u("\xE3\x81\x82\xE3\x81").scrub("\u3013"))
     assert_raise(Encoding::CompatibilityError){ u("\xE3\x81\x82\xE3\x81").scrub(e("\xA4\xA2")) }
     assert_raise(TypeError){ u("\xE3\x81\x82\xE3\x81").scrub(1) }
     assert_raise(ArgumentError){ u("\xE3\x81\x82\xE3\x81\x82\xE3\x81").scrub(u("\x81")) }
     assert_equal(e("\xA4\xA2\xA2\xAE"), e("\xA4\xA2\xA4").scrub(e("\xA2\xAE")))
+  end
 
+  def test_scrub_replace_block
     assert_equal("\u3042<e381>", u("\xE3\x81\x82\xE3\x81").scrub{|x|'<'+x.unpack('H*')[0]+'>'})
     assert_raise(Encoding::CompatibilityError){ u("\xE3\x81\x82\xE3\x81").scrub{e("\xA4\xA2")} }
     assert_raise(TypeError){ u("\xE3\x81\x82\xE3\x81").scrub{1} }
@@ -1537,7 +1564,9 @@ class TestM17N < Test::Unit::TestCase
 
     assert_equal(u("\x81"), u("a\x81").scrub {|c| break c})
     assert_raise(ArgumentError) {u("a\x81").scrub {|c| c}}
+  end
 
+  def test_scrub_widechar
     assert_equal("\uFFFD\u3042".encode("UTF-16BE"),
                  "\xD8\x00\x30\x42".force_encoding(Encoding::UTF_16BE).
                  scrub)
@@ -1563,5 +1592,14 @@ class TestM17N < Test::Unit::TestCase
     str.scrub!
     assert_same(str, str.scrub!)
     assert_equal("\uFFFD\uFFFD\uFFFD", str)
+  end
+
+  def test_escaped_metachar
+    bug10670 = '[ruby-core:67193] [Bug #10670]'
+
+    escape_plain = /\A[\x5B]*\z/.freeze
+
+    assert_match(escape_plain, 0x5b.chr(::Encoding::UTF_8), bug10670)
+    assert_match(escape_plain, 0x5b.chr, bug10670)
   end
 end

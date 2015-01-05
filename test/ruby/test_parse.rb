@@ -650,15 +650,20 @@ x = __ENCODING__
 
   def test_invalid_instance_variable
     assert_raise(SyntaxError) { eval('@#') }
+    assert_raise(SyntaxError) { eval('@') }
   end
 
   def test_invalid_class_variable
     assert_raise(SyntaxError) { eval('@@1') }
+    assert_raise(SyntaxError) { eval('@@') }
   end
 
   def test_invalid_char
+    bug10117 = '[ruby-core:64243] [Bug #10117]'
+    invalid_char = /Invalid char `\\x01'/
     x = 1
-    assert_equal(1, eval("\x01x"))
+    assert_in_out_err(%W"-e \x01x", "", [], invalid_char, bug10117)
+    assert_syntax_error("\x01x", invalid_char, bug10117)
     assert_equal(nil, eval("\x04x"))
   end
 
@@ -848,4 +853,30 @@ x = __ENCODING__
     actual = e.backtrace.first[/\A#{Regexp.quote(__FILE__)}:(\d+):/o, 1].to_i
     assert_equal(expected, actual, bug5614)
   end
+
+  def test_shadowing_variable
+    assert_warning(/shadowing outer local variable/) {eval("a=1; tap {|a|}")}
+    a = "\u{3042}"
+    assert_warning(/#{a}/o) {eval("#{a}=1; tap {|#{a}|}")}
+  end
+
+  def test_unused_variable
+    o = Object.new
+    assert_warning(/assigned but unused variable/) {o.instance_eval("def foo; a=1; nil; end")}
+    a = "\u{3042}"
+    assert_warning(/#{a}/) {o.instance_eval("def foo; #{a}=1; nil; end")}
+  end
+
+  def test_named_capture_conflict
+    a = 1
+    assert_warning(/named capture conflict/) {eval("a = 1; /(?<a>)/ =~ ''")}
+    a = "\u{3042}"
+    assert_warning(/#{a}/) {eval("#{a} = 1; /(?<#{a}>)/ =~ ''")}
+  end
+
+=begin
+  def test_past_scope_variable
+    assert_warning(/past scope/) {catch {|tag| eval("BEGIN{throw tag}; tap {a = 1}; a")}}
+  end
+=end
 end

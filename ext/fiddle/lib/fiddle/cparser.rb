@@ -82,10 +82,10 @@ module Fiddle
       tymap ||= {}
       case compact(signature)
       when /^(?:[\w\*\s]+)\(\*(\w+)\((.*?)\)\)(?:\[\w*\]|\(.*?\));?$/
-        func, args = $1, $2 
+        func, args = $1, $2
         return [func, TYPE_VOIDP, split_arguments(args).collect {|arg| parse_ctype(arg, tymap)}]
       when /^([\w\*\s]+[\*\s])(\w+)\((.*?)\);?$/
-        ret, func, args = $1.strip, $2, $3 
+        ret, func, args = $1.strip, $2, $3
         return [func, parse_ctype(ret, tymap), split_arguments(args).collect {|arg| parse_ctype(arg, tymap)}]
       else
         raise(RuntimeError,"can't parse the function prototype: #{signature}")
@@ -169,6 +169,7 @@ module Fiddle
       when /\*/, /\[[\s\d]*\]/
         return TYPE_VOIDP
       else
+        ty = ty.split(' ', 2)[0]
         if( tymap[ty] )
           return parse_ctype(tymap[ty], tymap)
         else

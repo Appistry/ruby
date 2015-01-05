@@ -3,7 +3,6 @@ require 'test/unit'
 require 'net/http'
 require 'stringio'
 require_relative 'utils'
-require_relative '../../ruby/envutil'
 
 class TestNetHTTP < Test::Unit::TestCase
 
@@ -189,6 +188,15 @@ class TestNetHTTP < Test::Unit::TestCase
     end
   end
 
+  def test_failure_message_includes_failed_domain_and_port
+    begin
+      Net::HTTP.get(URI.parse("http://doesnotexist.bogus"))
+      fail "should have raised"
+    rescue => e
+      assert_includes e.message, "doesnotexist.bogus:80"
+    end
+  end
+
 end
 
 module TestNetHTTP_version_1_1_methods
@@ -277,6 +285,7 @@ module TestNetHTTP_version_1_1_methods
       end
     }
     assert_equal 1, i
+    @log_tester = nil # server may encount ECONNRESET
   end
 
   def test_get__implicit_start
@@ -397,6 +406,7 @@ module TestNetHTTP_version_1_1_methods
   def test_timeout_during_HTTP_session
     bug4246 = "expected the HTTP session to have timed out but have not. c.f. [ruby-core:34203]"
 
+    th = nil
     # listen for connections... but deliberately do not read
     TCPServer.open('localhost', 0) {|server|
       port = server.addr[1]
@@ -412,6 +422,9 @@ module TestNetHTTP_version_1_1_methods
       end
       assert th.join(10), bug4246
     }
+  ensure
+    th.kill
+    th.join
   end
 end
 
@@ -559,10 +572,10 @@ module TestNetHTTP_version_1_2_methods
   end
 
   def _test_request__uri_host(http)
-    uri = URI 'http://example/'
+    uri = URI 'http://other.example/'
 
     req = Net::HTTP::Get.new(uri)
-    req['host'] = 'other.example'
+    req['host'] = 'example'
 
     res = http.request(req)
 
@@ -574,6 +587,7 @@ module TestNetHTTP_version_1_2_methods
   def test_send_request
     start {|http|
       _test_send_request__GET http
+      _test_send_request__HEAD http
       _test_send_request__POST http
     }
   end
@@ -586,6 +600,16 @@ module TestNetHTTP_version_1_2_methods
     end
     assert_kind_of String, res.body
     assert_equal $test_net_http_data, res.body
+  end
+
+  def _test_send_request__HEAD(http)
+    res = http.send_request('HEAD', '/')
+    assert_kind_of Net::HTTPResponse, res
+    unless self.is_a?(TestNetHTTP_v1_2_chunked)
+      assert_not_nil res['content-length']
+      assert_equal $test_net_http_data.size, res['content-length'].to_i
+    end
+    assert_nil res.body
   end
 
   def _test_send_request__POST(http)

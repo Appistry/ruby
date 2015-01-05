@@ -201,6 +201,8 @@ module Psych
             class_loader.rational
             h = Hash[*o.children.map { |c| accept c }]
             register o, Rational(h['numerator'], h['denominator'])
+          elsif name == 'Hash'
+            revive_hash(register(o, {}), o)
           else
             obj = revive((resolve_class(name) || class_loader.object), o)
             obj
@@ -269,6 +271,21 @@ module Psych
           end
           map
 
+        when /^!ruby\/marshalable:(.*)$/
+          name = $1
+          klass = resolve_class(name)
+          obj = register(o, klass.allocate)
+
+          if obj.respond_to?(:init_with)
+            init_with(obj, revive_hash({}, o), o)
+          elsif obj.respond_to?(:marshal_load)
+            marshal_data = o.children.map(&method(:accept))
+            obj.marshal_load(marshal_data)
+            obj
+          else
+            raise ArgumentError, "Cannot deserialize #{name}"
+          end
+
         else
           revive_hash(register(o, {}), o)
         end
@@ -303,9 +320,9 @@ module Psych
           key = accept(k)
           val = accept(v)
 
-          if key == '<<'
+          if key == '<<' && k.tag != "tag:yaml.org,2002:str"
             case v
-            when Nodes::Alias
+            when Nodes::Alias, Nodes::Mapping
               begin
                 hash.merge! val
               rescue TypeError

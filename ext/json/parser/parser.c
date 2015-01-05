@@ -28,16 +28,16 @@ static UTF32 unescape_unicode(const unsigned char *p)
     UTF32 result = 0;
     b = digit_values[p[0]];
     if (b < 0) return UNI_REPLACEMENT_CHAR;
-    result = (result << 4) | b;
+    result = (result << 4) | (unsigned char)b;
     b = digit_values[p[1]];
-    result = (result << 4) | b;
     if (b < 0) return UNI_REPLACEMENT_CHAR;
+    result = (result << 4) | (unsigned char)b;
     b = digit_values[p[2]];
-    result = (result << 4) | b;
     if (b < 0) return UNI_REPLACEMENT_CHAR;
+    result = (result << 4) | (unsigned char)b;
     b = digit_values[p[3]];
-    result = (result << 4) | b;
     if (b < 0) return UNI_REPLACEMENT_CHAR;
+    result = (result << 4) | (unsigned char)b;
     return result;
 }
 
@@ -1626,8 +1626,8 @@ static VALUE convert_encoding(VALUE source)
  *   (keys) in a JSON object. Otherwise strings are returned, which is also
  *   the default.
  * * *create_additions*: If set to false, the Parser doesn't create
- *   additions even if a matchin class and create_id was found. This option
- *   defaults to true.
+ *   additions even if a matching class and create_id was found. This option
+ *   defaults to false.
  * * *object_class*: Defaults to Hash
  * * *array_class*: Defaults to Array
  */
@@ -2092,16 +2092,16 @@ static VALUE cParser_parse(VALUE self)
 }
 
 
-static JSON_Parser *JSON_allocate()
+static JSON_Parser *JSON_allocate(void)
 {
-    JSON_Parser *json = ALLOC(JSON_Parser);
-    MEMZERO(json, JSON_Parser, 1);
+    JSON_Parser *json = ZALLOC(JSON_Parser);
     json->fbuffer = fbuffer_alloc(0);
     return json;
 }
 
-static void JSON_mark(JSON_Parser *json)
+static void JSON_mark(void *ptr)
 {
+    JSON_Parser *json = ptr;
     rb_gc_mark_maybe(json->Vsource);
     rb_gc_mark_maybe(json->create_id);
     rb_gc_mark_maybe(json->object_class);
@@ -2109,16 +2109,38 @@ static void JSON_mark(JSON_Parser *json)
     rb_gc_mark_maybe(json->match_string);
 }
 
-static void JSON_free(JSON_Parser *json)
+static void JSON_free(void *ptr)
 {
+    JSON_Parser *json = ptr;
     fbuffer_free(json->fbuffer);
     ruby_xfree(json);
 }
 
+static size_t JSON_memsize(const void *ptr)
+{
+    const JSON_Parser *json = ptr;
+    return sizeof(*json) + FBUFFER_CAPA(json->fbuffer);
+}
+
+#ifdef HAVE_TYPE_RB_DATA_TYPE_T
+static const rb_data_type_t JSON_Parser_type = {
+    "JSON/Parser",
+    {JSON_mark, JSON_free, JSON_memsize,},
+#ifdef RUBY_TYPED_FREE_IMMEDIATELY
+    0, 0,
+    RUBY_TYPED_FREE_IMMEDIATELY,
+#endif
+};
+#endif
+
 static VALUE cJSON_parser_s_allocate(VALUE klass)
 {
     JSON_Parser *json = JSON_allocate();
+#ifdef HAVE_TYPE_RB_DATA_TYPE_T
+    return TypedData_Wrap_Struct(klass, &JSON_Parser_type, json);
+#else
     return Data_Wrap_Struct(klass, JSON_mark, JSON_free, json);
+#endif
 }
 
 /*
@@ -2145,7 +2167,7 @@ static VALUE cParser_quirks_mode_p(VALUE self)
 }
 
 
-void Init_parser()
+void Init_parser(void)
 {
     rb_require("json/common");
     mJSON = rb_define_module("JSON");

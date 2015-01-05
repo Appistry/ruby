@@ -33,7 +33,7 @@ y.tab.c
 /*.pc
 /*_prelude.c
 /COPYING.LIB
-/ChangeLog-1.8.0
+/ChangeLog-*
 /ChangeLog.pre-alpha
 /ChangeLog.pre1_1
 /Doxyfile
@@ -55,6 +55,11 @@ y.tab.c
 /config.status
 /config.status.lineno
 /configure
+/coverage/simplecov
+/coverage/.last_run.json
+/coverage/.resultset.json*
+/coverage/assets
+/coverage/index.html
 /doc/capi
 /enc.mk
 /encdb.h
@@ -100,6 +105,8 @@ y.tab.c
 /benchmark/fasta.output.*
 /benchmark/wc.input
 
+/enc/unicode/data
+
 # /enc/trans/
 /enc/trans/*.c
 
@@ -109,6 +116,12 @@ y.tab.c
 # /ext/dl/callback/
 /ext/dl/callback/callback-*.c
 /ext/dl/callback/callback.c
+
+# /ext/etc/
+/ext/etc/constdefs.h
+
+# /ext/fiddle/
+/ext/fiddle/libffi-*
 
 # /ext/rbconfig/
 /ext/rbconfig/sizeof/sizes.c
@@ -127,6 +140,9 @@ y.tab.c
 
 # /ext/tk/
 /ext/tk/config_list
+
+# /gems
+/gems/*.gem
 
 # /spec/
 /spec/mspec

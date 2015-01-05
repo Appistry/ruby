@@ -37,7 +37,7 @@ class Net::HTTPResponse
 
     def read_status_line(sock)
       str = sock.readline
-      m = /\AHTTP(?:\/(\d+\.\d+))?\s+(\d\d\d)\s*(.*)\z/in.match(str) or
+      m = /\AHTTP(?:\/(\d+\.\d+))?\s+(\d\d\d)(?:\s+(.*))?\z/in.match(str) or
         raise Net::HTTPBadResponse, "wrong status line: #{str.dump}"
       m.captures
     end
@@ -259,7 +259,12 @@ class Net::HTTPResponse
       begin
         yield inflate_body_io
       ensure
-        inflate_body_io.finish
+        e = $!
+        begin
+          inflate_body_io.finish
+        rescue
+          raise e
+        end
       end
     when 'none', 'identity' then
       self.delete 'content-encoding'
@@ -301,7 +306,6 @@ class Net::HTTPResponse
   # See RFC 2616 section 3.6.1 for definitions
 
   def read_chunked(dest, chunk_data_io) # :nodoc:
-    len = nil
     total = 0
     while true
       line = @socket.readline
@@ -364,6 +368,11 @@ class Net::HTTPResponse
     # entire body in memory.
 
     def inflate_adapter(dest)
+      if dest.respond_to?(:set_encoding)
+        dest.set_encoding(Encoding::ASCII_8BIT)
+      elsif dest.respond_to?(:force_encoding)
+        dest.force_encoding(Encoding::ASCII_8BIT)
+      end
       block = proc do |compressed_chunk|
         @inflate.inflate(compressed_chunk) do |chunk|
           dest << chunk

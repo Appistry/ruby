@@ -167,11 +167,6 @@ void xfree(void*);
 #include <net/socket.h> /* intern.h needs fd_set definition */
 #endif
 
-#ifdef __SYMBIAN32__
-# define FALSE 0
-# define TRUE 1
-#endif
-
 #ifdef RUBY_EXPORT
 #undef RUBY_EXTERN
 
@@ -245,9 +240,12 @@ void rb_ia64_flushrs(void);
 #define RUBY_PLATFORM "unknown-unknown"
 #endif
 
+#ifndef FUNC_MINIMIZED
+#define FUNC_MINIMIZED(x) x
+#endif
 #ifndef RUBY_ALIAS_FUNCTION_TYPE
 #define RUBY_ALIAS_FUNCTION_TYPE(type, prot, name, args) \
-    type prot {return name args;}
+    FUNC_MINIMIZED(type prot) {return name args;}
 #endif
 #ifndef RUBY_ALIAS_FUNCTION_VOID
 #define RUBY_ALIAS_FUNCTION_VOID(prot, name, args) \
@@ -256,6 +254,27 @@ void rb_ia64_flushrs(void);
 #ifndef RUBY_ALIAS_FUNCTION
 #define RUBY_ALIAS_FUNCTION(prot, name, args) \
     RUBY_ALIAS_FUNCTION_TYPE(VALUE, prot, name, args)
+#endif
+
+#ifndef UNALIGNED_WORD_ACCESS
+# if defined(__i386) || defined(__i386__) || defined(_M_IX86) || \
+     defined(__x86_64) || defined(__x86_64__) || defined(_M_AMD64) || \
+     defined(__powerpc64__) || \
+     defined(__mc68020__)
+#   define UNALIGNED_WORD_ACCESS 1
+# else
+#   define UNALIGNED_WORD_ACCESS 0
+# endif
+#endif
+#ifndef PACKED_STRUCT
+# define PACKED_STRUCT(x) x
+#endif
+#ifndef PACKED_STRUCT_UNALIGNED
+# if UNALIGNED_WORD_ACCESS
+#   define PACKED_STRUCT_UNALIGNED(x) PACKED_STRUCT(x)
+# else
+#   define PACKED_STRUCT_UNALIGNED(x) x
+# endif
 #endif
 
 RUBY_SYMBOL_EXPORT_END

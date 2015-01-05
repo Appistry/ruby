@@ -9,8 +9,12 @@
 
 **********************************************************************/
 
-#include "ruby/ruby.h"
 #include "internal.h"
+#include "vm_core.h"
+#include "method.h"
+
+VALUE rb_method_for_self_aref(VALUE name, VALUE arg, rb_insn_func_t func);
+VALUE rb_method_for_self_aset(VALUE name, VALUE arg, rb_insn_func_t func);
 
 VALUE rb_cStruct;
 static ID id_members;
@@ -106,12 +110,6 @@ rb_struct_getmember(VALUE obj, ID id)
     UNREACHABLE;
 }
 
-static VALUE
-rb_struct_ref(VALUE obj)
-{
-    return rb_struct_getmember(obj, rb_frame_this_func());
-}
-
 static VALUE rb_struct_ref0(VALUE obj) {return RSTRUCT_GET(obj, 0);}
 static VALUE rb_struct_ref1(VALUE obj) {return RSTRUCT_GET(obj, 1);}
 static VALUE rb_struct_ref2(VALUE obj) {return RSTRUCT_GET(obj, 2);}
@@ -146,31 +144,6 @@ rb_struct_modify(VALUE s)
 }
 
 static VALUE
-rb_struct_set(VALUE obj, VALUE val)
-{
-    VALUE members, slot, fsym;
-    long i, len;
-    ID fid = rb_frame_this_func();
-
-    members = rb_struct_members(obj);
-    len = RARRAY_LEN(members);
-    rb_struct_modify(obj);
-    fid = rb_id_attrget(fid);
-    if (!fid) not_a_member(rb_frame_this_func());
-    fsym = ID2SYM(fid);
-    for (i=0; i<len; i++) {
-	slot = RARRAY_AREF(members, i);
-	if (slot == fsym) {
-	    RSTRUCT_SET(obj, i, val);
-	    return val;
-	}
-    }
-    not_a_member(fid);
-
-    UNREACHABLE;
-}
-
-static VALUE
 anonymous_struct(VALUE klass)
 {
     VALUE nstr;
@@ -199,6 +172,28 @@ new_struct(VALUE name, VALUE super)
     return rb_define_class_id_under(super, id, super);
 }
 
+static void
+define_aref_method(VALUE nstr, VALUE name, VALUE off)
+{
+    rb_control_frame_t *FUNC_FASTCALL(rb_vm_opt_struct_aref)(rb_thread_t *, rb_control_frame_t *);
+    VALUE iseqval = rb_method_for_self_aref(name, off, rb_vm_opt_struct_aref);
+    rb_iseq_t *iseq = DATA_PTR(iseqval);
+
+    rb_add_method(nstr, SYM2ID(name), VM_METHOD_TYPE_ISEQ, iseq, NOEX_PUBLIC);
+    RB_GC_GUARD(iseqval);
+}
+
+static void
+define_aset_method(VALUE nstr, VALUE name, VALUE off)
+{
+    rb_control_frame_t *FUNC_FASTCALL(rb_vm_opt_struct_aset)(rb_thread_t *, rb_control_frame_t *);
+    VALUE iseqval = rb_method_for_self_aset(name, off, rb_vm_opt_struct_aset);
+    rb_iseq_t *iseq = DATA_PTR(iseqval);
+
+    rb_add_method(nstr, SYM2ID(name), VM_METHOD_TYPE_ISEQ, iseq, NOEX_PUBLIC);
+    RB_GC_GUARD(iseqval);
+}
+
 static VALUE
 setup_struct(VALUE nstr, VALUE members)
 {
@@ -216,13 +211,15 @@ setup_struct(VALUE nstr, VALUE members)
     len = RARRAY_LEN(members);
     for (i=0; i< len; i++) {
 	ID id = SYM2ID(ptr_members[i]);
+	VALUE off = LONG2NUM(i);
+
 	if (i < N_REF_FUNC) {
 	    rb_define_method_id(nstr, id, ref_func[i], 0);
 	}
 	else {
-	    rb_define_method_id(nstr, id, rb_struct_ref, 0);
+	    define_aref_method(nstr, ptr_members[i], off);
 	}
-	rb_define_method_id(nstr, rb_id_attrset(id), rb_struct_set, 1);
+	define_aset_method(nstr, ID2SYM(rb_id_attrset(id)), off);
     }
 
     return nstr;
@@ -601,7 +598,7 @@ rb_struct_each_pair(VALUE s)
 static VALUE
 inspect_struct(VALUE s, VALUE dummy, int recur)
 {
-    VALUE cname = rb_class_name(rb_obj_class(s));
+    VALUE cname = rb_class_path(rb_obj_class(s));
     VALUE members, str = rb_str_new2("#<struct ");
     long i, len;
     char first = RSTRING_PTR(cname)[0];
@@ -759,7 +756,7 @@ rb_struct_aref(VALUE s, VALUE idx)
 	return rb_struct_aref_sym(s, idx);
     }
     else if (RB_TYPE_P(idx, T_STRING)) {
-	ID id = rb_check_id_without_pindown(&idx);
+	ID id = rb_check_id(&idx);
 	if (!id) {
 	    rb_name_error_str(idx, "no member '%"PRIsVALUE"' in struct",
 			      QUOTE(idx));
@@ -1064,7 +1061,7 @@ rb_struct_size(VALUE s)
  *  Symbol (<code>:name</code>).
  */
 void
-Init_Struct(void)
+InitVM_Struct(void)
 {
     rb_cStruct = rb_define_class("Struct", rb_cObject);
     rb_include_module(rb_cStruct, rb_mEnumerable);
@@ -1095,5 +1092,13 @@ Init_Struct(void)
     rb_define_method(rb_cStruct, "values_at", rb_struct_values_at, -1);
 
     rb_define_method(rb_cStruct, "members", rb_struct_members_m, 0);
+}
+
+#undef rb_intern
+void
+Init_Struct(void)
+{
     id_members = rb_intern("__members__");
+
+    InitVM(Struct);
 }

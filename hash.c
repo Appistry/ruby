@@ -11,11 +11,9 @@
 
 **********************************************************************/
 
-#include "ruby/ruby.h"
+#include "internal.h"
 #include "ruby/st.h"
 #include "ruby/util.h"
-#include "ruby/encoding.h"
-#include "internal.h"
 #include <errno.h>
 #include "probes.h"
 #include "id.h"
@@ -68,6 +66,12 @@ VALUE rb_cHash;
 
 static VALUE envtbl;
 static ID id_hash, id_yield, id_default, id_flatten_bang;
+
+VALUE
+rb_hash_ifnone(VALUE h)
+{
+    return RHASH_IFNONE(h);
+}
 
 VALUE
 rb_hash_set_ifnone(VALUE hash, VALUE ifnone)
@@ -133,7 +137,7 @@ rb_any_hash(VALUE a)
 
     if (SPECIAL_CONST_P(a)) {
 	if (a == Qundef) return 0;
-	if (SYMBOL_P(a)) a >>= (RUBY_SPECIAL_SHIFT + ID_SCOPE_SHIFT);
+	if (STATIC_SYM_P(a)) a >>= (RUBY_SPECIAL_SHIFT + ID_SCOPE_SHIFT);
 	hnum = rb_objid_hash((st_index_t)a);
     }
     else if (BUILTIN_TYPE(a) == T_STRING) {
@@ -156,12 +160,17 @@ rb_objid_hash(st_index_t index)
     return hnum;
 }
 
+int
+rb_hash_iter_lev(VALUE h)
+{
+    return RHASH_ITER_LEV(h);
+}
+
 static const struct st_hash_type objhash = {
     rb_any_cmp,
     rb_any_hash,
 };
 
-extern const struct st_hash_type st_hashtype_num;
 #define identhash st_hashtype_num
 
 typedef int st_foreach_func(st_data_t, st_data_t, st_data_t);
@@ -487,7 +496,8 @@ rb_hash_initialize(int argc, VALUE *argv, VALUE hash)
 	FL_SET(hash, HASH_PROC_DEFAULT);
     }
     else {
-	rb_scan_args(argc, argv, "01", &ifnone);
+	rb_check_arity(argc, 0, 1);
+	ifnone = argc == 0 ? Qnil : argv[0];
 	RHASH_SET_IFNONE(hash, ifnone);
     }
 
@@ -754,11 +764,12 @@ rb_hash_lookup(VALUE hash, VALUE key)
 static VALUE
 rb_hash_fetch_m(int argc, VALUE *argv, VALUE hash)
 {
-    VALUE key, if_none;
+    VALUE key;
     st_data_t val;
     long block_given;
 
-    rb_scan_args(argc, argv, "11", &key, &if_none);
+    rb_check_arity(argc, 1, 2);
+    key = argv[0];
 
     block_given = rb_block_given_p();
     if (block_given && argc == 2) {
@@ -774,7 +785,7 @@ rb_hash_fetch_m(int argc, VALUE *argv, VALUE hash)
 	    desc = rb_str_ellipsize(desc, 65);
 	    rb_raise(rb_eKeyError, "key not found: %"PRIsVALUE, desc);
 	}
-	return if_none;
+	return argv[1];
     }
     return (VALUE)val;
 }
@@ -811,7 +822,8 @@ rb_hash_default(int argc, VALUE *argv, VALUE hash)
 {
     VALUE key, ifnone;
 
-    rb_scan_args(argc, argv, "01", &key);
+    rb_check_arity(argc, 0, 1);
+    key = argv[0];
     ifnone = RHASH_IFNONE(hash);
     if (FL_TEST(hash, HASH_PROC_DEFAULT)) {
 	if (argc == 0) return Qnil;
@@ -886,7 +898,7 @@ rb_hash_default_proc(VALUE hash)
  *     h["cat"]   #=> "catcat"
  */
 
-static VALUE
+VALUE
 rb_hash_set_default_proc(VALUE hash, VALUE proc)
 {
     VALUE b;
@@ -957,22 +969,48 @@ rb_hash_index(VALUE hash, VALUE value)
     return rb_hash_key(hash, value);
 }
 
-static VALUE
-rb_hash_delete_key(VALUE hash, VALUE key)
+/*
+ * delete a specified entry a given key.
+ * if there is the corresponding entry, return a value of the entry.
+ * if there is no corresponding entry, return Qundef.
+ */
+VALUE
+rb_hash_delete_entry(VALUE hash, VALUE key)
 {
     st_data_t ktmp = (st_data_t)key, val;
 
-    if (!RHASH(hash)->ntbl)
-        return Qundef;
-    if (RHASH_ITER_LEV(hash) > 0) {
-	if (st_delete_safe(RHASH(hash)->ntbl, &ktmp, &val, (st_data_t)Qundef)) {
-	    FL_SET(hash, HASH_DELETED);
-	    return (VALUE)val;
-	}
+    if (!RHASH(hash)->ntbl) {
+	return Qundef;
     }
-    else if (st_delete(RHASH(hash)->ntbl, &ktmp, &val))
+    else if (RHASH_ITER_LEV(hash) > 0 &&
+	     (st_delete_safe(RHASH(hash)->ntbl, &ktmp, &val, (st_data_t)Qundef))) {
+	FL_SET(hash, HASH_DELETED);
 	return (VALUE)val;
-    return Qundef;
+    }
+    else if (st_delete(RHASH(hash)->ntbl, &ktmp, &val)) {
+	return (VALUE)val;
+    }
+    else {
+	return Qundef;
+    }
+}
+
+/*
+ * delete a specified entry by a given key.
+ * if there is the corresponding entry, return a value of the entry.
+ * if there is no corresponding entry, return Qnil.
+ */
+VALUE
+rb_hash_delete(VALUE hash, VALUE key)
+{
+    VALUE deleted_value = rb_hash_delete_entry(hash, key);
+
+    if (deleted_value != Qundef) { /* likely pass */
+	return deleted_value;
+    }
+    else {
+	return Qnil;
+    }
 }
 
 /*
@@ -993,18 +1031,25 @@ rb_hash_delete_key(VALUE hash, VALUE key)
  *
  */
 
-VALUE
-rb_hash_delete(VALUE hash, VALUE key)
+static VALUE
+rb_hash_delete_m(VALUE hash, VALUE key)
 {
     VALUE val;
 
     rb_hash_modify_check(hash);
-    val = rb_hash_delete_key(hash, key);
-    if (val != Qundef) return val;
-    if (rb_block_given_p()) {
-	return rb_yield(key);
+    val = rb_hash_delete_entry(hash, key);
+
+    if (val != Qundef) {
+	return val;
     }
-    return Qnil;
+    else {
+	if (rb_block_given_p()) {
+	    return rb_yield(key);
+	}
+	else {
+	    return Qnil;
+	}
+    }
 }
 
 struct shift_var {
@@ -1051,7 +1096,7 @@ rb_hash_shift(VALUE hash)
 	else {
 	    rb_hash_foreach(hash, shift_i_safe, (VALUE)&var);
 	    if (var.key != Qundef) {
-		rb_hash_delete_key(hash, var.key);
+		rb_hash_delete_entry(hash, var.key);
 		return rb_assoc_new(var.key, var.val);
 	    }
 	}
@@ -1067,8 +1112,6 @@ delete_if_i(VALUE key, VALUE value, VALUE hash)
     }
     return ST_CONTINUE;
 }
-
-static VALUE rb_hash_size(VALUE hash);
 
 static VALUE
 hash_enum_size(VALUE hash, VALUE args, VALUE eobj)
@@ -1353,7 +1396,8 @@ NOINSERT_UPDATE_CALLBACK(hash_aset_str);
  *     h["a"] = 9
  *     h["c"] = 4
  *     h   #=> {"a"=>9, "b"=>200, "c"=>4}
- *     h.store("d", 42) #=> {"a"=>9, "b"=>200, "c"=>4, "d"=>42}
+ *     h.store("d", 42) #=> 42
+ *     h   #=> {"a"=>9, "b"=>200, "c"=>4, "d"=>42}
  *
  *  +key+ should not have its value changed while it is in use as a key (an
  *  <tt>unfrozen String</tt> passed as a key will be duplicated and frozen).
@@ -1478,7 +1522,7 @@ rb_hash_replace(VALUE hash, VALUE hash2)
  *     h.length        #=> 3
  */
 
-static VALUE
+VALUE
 rb_hash_size(VALUE hash)
 {
     return INT2FIX(RHASH_SIZE(hash));
@@ -1756,7 +1800,7 @@ keys_i(VALUE key, VALUE value, VALUE ary)
  *
  */
 
-static VALUE
+VALUE
 rb_hash_keys(VALUE hash)
 {
     VALUE keys;
@@ -1768,7 +1812,7 @@ rb_hash_keys(VALUE hash)
     if (ST_DATA_COMPATIBLE_P(VALUE)) {
 	st_table *table = RHASH(hash)->ntbl;
 
-	if (OBJ_PROMOTED(keys)) rb_gc_writebarrier_remember_promoted(keys);
+	rb_gc_writebarrier_remember(keys);
 	RARRAY_PTR_USE(keys, ptr, {
 	    size = st_keys_check(table, ptr, size, Qundef);
 	});
@@ -1812,7 +1856,7 @@ rb_hash_values(VALUE hash)
     if (ST_DATA_COMPATIBLE_P(VALUE)) {
 	st_table *table = RHASH(hash)->ntbl;
 
-	if (OBJ_PROMOTED(values)) rb_gc_writebarrier_remember_promoted(values);
+	rb_gc_writebarrier_remember(values);
 	RARRAY_PTR_USE(values, ptr, {
 	    size = st_values_check(table, ptr, size, Qundef);
 	});
@@ -1840,7 +1884,7 @@ rb_hash_values(VALUE hash)
  *
  */
 
-static VALUE
+VALUE
 rb_hash_has_key(VALUE hash, VALUE key)
 {
     if (!RHASH(hash)->ntbl)
@@ -1930,13 +1974,20 @@ hash_equal(VALUE hash1, VALUE hash2, int eql)
 
     if (hash1 == hash2) return Qtrue;
     if (!RB_TYPE_P(hash2, T_HASH)) {
-	if (!rb_respond_to(hash2, rb_intern("to_hash"))) {
+	if (!rb_respond_to(hash2, idTo_hash)) {
 	    return Qfalse;
 	}
-	if (eql)
-	    return rb_eql(hash2, hash1);
-	else
+	if (eql) {
+	    if (rb_eql(hash2, hash1)) {
+		return Qtrue;
+	    }
+	    else {
+		return Qfalse;
+	    }
+	}
+	else {
 	    return rb_equal(hash2, hash1);
+	}
     }
     if (RHASH_SIZE(hash1) != RHASH_SIZE(hash2))
 	return Qfalse;
@@ -2042,6 +2093,8 @@ rb_hash_invert_i(VALUE key, VALUE value, VALUE hash)
  *
  *  Returns a new hash created by using <i>hsh</i>'s values as keys, and
  *  the keys as values.
+ *  If a key with the same value already exists in the <i>hsh</i>, then
+ *  the last one defined will be used, the earlier value(s) will be discarded.
  *
  *     h = { "n" => 100, "m" => 100, "y" => 300, "d" => 200, "a" => 0 }
  *     h.invert   #=> {0=>"a", 100=>"m", 200=>"d", 300=>"y"}
@@ -2450,6 +2503,52 @@ rb_hash_compare_by_id_p(VALUE hash)
     return Qfalse;
 }
 
+static int
+any_p_i(VALUE key, VALUE value, VALUE arg)
+{
+    VALUE ret = rb_yield(rb_assoc_new(key, value));
+    if (RTEST(ret)) {
+	*(VALUE *)arg = Qtrue;
+	return ST_STOP;
+    }
+    return ST_CONTINUE;
+}
+
+static int
+any_p_i_fast(VALUE key, VALUE value, VALUE arg)
+{
+    VALUE ret = rb_yield_values(2, key, value);
+    if (RTEST(ret)) {
+	*(VALUE *)arg = Qtrue;
+	return ST_STOP;
+    }
+    return ST_CONTINUE;
+}
+
+/*
+ *  call-seq:
+ *     hsh.any? [{ |(key, value)| block }]   -> true or false
+ *
+ *  See also Enumerable#any?
+ */
+
+static VALUE
+rb_hash_any_p(VALUE hash)
+{
+    VALUE ret = Qfalse;
+
+    if (RHASH_EMPTY_P(hash)) return Qfalse;
+    if (!rb_block_given_p()) {
+	/* yields pairs, never false */
+	return Qtrue;
+    }
+    if (rb_block_arity() > 1)
+	rb_hash_foreach(hash, any_p_i_fast, (VALUE)&ret);
+    else
+	rb_hash_foreach(hash, any_p_i, (VALUE)&ret);
+    return ret;
+}
+
 static int path_tainted = -1;
 
 static char **origenviron;
@@ -2490,13 +2589,35 @@ extern char **environ;
 #define ENVNMATCH(s1, s2, n) (memcmp((s1), (s2), (n)) == 0)
 #endif
 
+#ifdef _WIN32
+static VALUE
+env_str_transcode(VALUE str, rb_encoding *enc)
+{
+    return rb_str_conv_enc_opts(str, rb_utf8_encoding(), enc,
+				ECONV_INVALID_REPLACE | ECONV_UNDEF_REPLACE, Qnil);
+}
+#endif
+
 static VALUE
 env_str_new(const char *ptr, long len)
 {
 #ifdef _WIN32
-    VALUE str = rb_str_conv_enc(rb_str_new(ptr, len), rb_utf8_encoding(), rb_locale_encoding());
+    VALUE str = env_str_transcode(rb_str_new(ptr, len), rb_locale_encoding());
 #else
     VALUE str = rb_locale_str_new(ptr, len);
+#endif
+
+    rb_obj_freeze(str);
+    return str;
+}
+
+static VALUE
+env_path_str_new(const char *ptr)
+{
+#ifdef _WIN32
+    VALUE str = env_str_transcode(rb_str_new_cstr(ptr), rb_filesystem_encoding());
+#else
+    VALUE str = rb_filesystem_str_new_cstr(ptr);
 #endif
 
     rb_obj_freeze(str);
@@ -2510,16 +2631,27 @@ env_str_new2(const char *ptr)
     return env_str_new(ptr, strlen(ptr));
 }
 
+#define get_env_ptr(var, val) \
+    (memchr((var = RSTRING_PTR(val)), '\0', RSTRING_LEN(val)) ? \
+     rb_raise(rb_eArgError, "bad environment variable " #var) : (void)0)
+
+static inline const char *
+env_name(volatile VALUE *s)
+{
+    const char *name;
+    SafeStringValue(*s);
+    get_env_ptr(name, *s);
+    return name;
+}
+
+#define env_name(s) env_name(&(s))
+
 static VALUE
 env_delete(VALUE obj, VALUE name)
 {
-    char *nam, *val;
+    const char *nam, *val;
 
-    SafeStringValue(name);
-    nam = RSTRING_PTR(name);
-    if (memchr(nam, '\0', RSTRING_LEN(name))) {
-	rb_raise(rb_eArgError, "bad environment variable name");
-    }
+    nam = env_name(name);
     val = getenv(nam);
     if (val) {
 	VALUE value = env_str_new2(val);
@@ -2564,24 +2696,13 @@ static int env_path_tainted(const char *);
 static VALUE
 rb_f_getenv(VALUE obj, VALUE name)
 {
-    char *nam, *env;
+    const char *nam, *env;
 
-    SafeStringValue(name);
-    nam = RSTRING_PTR(name);
-    if (memchr(nam, '\0', RSTRING_LEN(name))) {
-	rb_raise(rb_eArgError, "bad environment variable name");
-    }
+    nam = env_name(name);
     env = getenv(nam);
     if (env) {
 	if (ENVMATCH(nam, PATH_ENV) && !env_path_tainted(env)) {
-#ifdef _WIN32
-	    VALUE str = rb_str_conv_enc(rb_str_new(env, strlen(env)), rb_utf8_encoding(), rb_filesystem_encoding());
-#else
-	    VALUE str = rb_filesystem_str_new_cstr(env);
-#endif
-
-	    rb_obj_freeze(str);
-	    return str;
+	    return env_path_str_new(env);
 	}
 	return env_str_new2(env);
     }
@@ -2605,34 +2726,27 @@ rb_f_getenv(VALUE obj, VALUE name)
 static VALUE
 env_fetch(int argc, VALUE *argv)
 {
-    VALUE key, if_none;
+    VALUE key;
     long block_given;
-    char *nam, *env;
+    const char *nam, *env;
 
-    rb_scan_args(argc, argv, "11", &key, &if_none);
+    rb_check_arity(argc, 1, 2);
+    key = argv[0];
     block_given = rb_block_given_p();
     if (block_given && argc == 2) {
 	rb_warn("block supersedes default value argument");
     }
-    SafeStringValue(key);
-    nam = RSTRING_PTR(key);
-    if (memchr(nam, '\0', RSTRING_LEN(key))) {
-	rb_raise(rb_eArgError, "bad environment variable name");
-    }
+    nam = env_name(key);
     env = getenv(nam);
     if (!env) {
 	if (block_given) return rb_yield(key);
 	if (argc == 1) {
 	    rb_raise(rb_eKeyError, "key not found: \"%"PRIsVALUE"\"", key);
 	}
-	return if_none;
+	return argv[1];
     }
     if (ENVMATCH(nam, PATH_ENV) && !env_path_tainted(env))
-#ifdef _WIN32
-	return rb_str_conv_enc(rb_str_new(env, strlen(env)), rb_utf8_encoding(), rb_filesystem_encoding());
-#else
-	return rb_filesystem_str_new_cstr(env);
-#endif
+	return env_path_str_new(env);
     return env_str_new2(env);
 }
 
@@ -2697,13 +2811,15 @@ getenvsize(const char* p)
     return p - porg + 1;
 }
 static size_t
-getenvblocksize()
+getenvblocksize(void)
 {
     return (rb_w32_osver() >= 5) ? 32767 : 5120;
 }
 #endif
 
-#if !defined(HAVE_SETENV) || !defined(HAVE_UNSETENV)
+#if defined(_WIN32) || \
+  (defined(__sun) && !(defined(HAVE_SETENV) && defined(HAVE_UNSETENV)))
+
 NORETURN(static void invalid_envname(const char *name));
 
 static void
@@ -2730,9 +2846,12 @@ ruby_setenv(const char *name, const char *value)
     int failed = 0;
     check_envname(name);
     if (value) {
-	const char* p = GetEnvironmentStringsA();
+	char* p = GetEnvironmentStringsA();
+	size_t n;
 	if (!p) goto fail; /* never happen */
-	if (strlen(name) + 2 + strlen(value) + getenvsize(p) >= getenvblocksize()) {
+	n = strlen(name) + 2 + strlen(value) + getenvsize(p);
+	FreeEnvironmentStringsA(p);
+	if (n >= getenvblocksize()) {
 	    goto fail;  /* 2 for '=' & '\0' */
 	}
 	buf = rb_sprintf("%s=%s", name, value);
@@ -2769,10 +2888,22 @@ ruby_setenv(const char *name, const char *value)
 #endif
     }
 #elif defined __sun
-    size_t len;
-    char **env_ptr, *str;
+    /* Solaris 9 (or earlier) does not have setenv(3C) and unsetenv(3C). */
+    /* The below code was tested on Solaris 10 by:
+         % ./configure ac_cv_func_setenv=no ac_cv_func_unsetenv=no
+    */
+    size_t len, mem_size;
+    char **env_ptr, *str, *mem_ptr;
 
+    check_envname(name);
     len = strlen(name);
+    if (value) {
+	mem_size = len + strlen(value) + 2;
+	mem_ptr = malloc(mem_size);
+	if (mem_ptr == NULL)
+	    rb_sys_fail_str(rb_sprintf("malloc("PRIuSIZE")", mem_size));
+	snprintf(mem_ptr, mem_size, "%s=%s", name, value);
+    }
     for (env_ptr = GET_ENVIRON(environ); (str = *env_ptr) != 0; ++env_ptr) {
 	if (!strncmp(str, name, len) && str[len] == '=') {
 	    if (!in_origenv(str)) free(str);
@@ -2781,10 +2912,10 @@ ruby_setenv(const char *name, const char *value)
 	}
     }
     if (value) {
-	str = malloc(len += strlen(value) + 2);
-	snprintf(str, len, "%s=%s", name, value);
-	if (putenv(str))
+	if (putenv(mem_ptr)) {
+	    free(mem_ptr);
 	    rb_sys_fail_str(rb_sprintf("putenv(%s)", name));
+	}
     }
 #else  /* WIN32 */
     size_t len;
@@ -2852,14 +2983,12 @@ env_aset(VALUE obj, VALUE nm, VALUE val)
 	env_delete(obj, nm);
 	return Qnil;
     }
-    StringValue(nm);
-    StringValue(val);
-    name = RSTRING_PTR(nm);
-    value = RSTRING_PTR(val);
-    if (memchr(name, '\0', RSTRING_LEN(nm)))
-	rb_raise(rb_eArgError, "bad environment variable name");
-    if (memchr(value, '\0', RSTRING_LEN(val)))
-	rb_raise(rb_eArgError, "bad environment variable value");
+    SafeStringValue(nm);
+    SafeStringValue(val);
+    /* nm can be modified in `val.to_str`, don't get `name` before
+     * check for `val` */
+    get_env_ptr(name, nm);
+    get_env_ptr(value, val);
 
     ruby_setenv(name, value);
     if (ENVMATCH(name, PATH_ENV)) {
@@ -3115,23 +3244,21 @@ static VALUE
 env_select(VALUE ehash)
 {
     VALUE result;
-    char **env;
+    VALUE keys;
+    long i;
 
     RETURN_SIZED_ENUMERATOR(ehash, 0, 0, rb_env_size);
     result = rb_hash_new();
-    env = GET_ENVIRON(environ);
-    while (*env) {
-	char *s = strchr(*env, '=');
-	if (s) {
-	    VALUE k = env_str_new(*env, s-*env);
-	    VALUE v = env_str_new2(s+1);
-	    if (RTEST(rb_yield_values(2, k, v))) {
-		rb_hash_aset(result, k, v);
+    keys = env_keys();
+    for (i = 0; i < RARRAY_LEN(keys); ++i) {
+	VALUE key = RARRAY_AREF(keys, i);
+	VALUE val = rb_f_getenv(Qnil, key);
+	if (!NIL_P(val)) {
+	    if (RTEST(rb_yield_values(2, key, val))) {
+		rb_hash_aset(result, key, val);
 	    }
 	}
-	env++;
     }
-    FREE_ENVIRON(environ);
 
     return result;
 }
@@ -3348,11 +3475,9 @@ env_empty_p(void)
 static VALUE
 env_has_key(VALUE env, VALUE key)
 {
-    char *s;
+    const char *s;
 
-    s = StringValuePtr(key);
-    if (memchr(s, '\0', RSTRING_LEN(key)))
-	rb_raise(rb_eArgError, "bad environment variable name");
+    s = env_name(key);
     if (getenv(s)) return Qtrue;
     return Qfalse;
 }
@@ -3367,11 +3492,9 @@ env_has_key(VALUE env, VALUE key)
 static VALUE
 env_assoc(VALUE env, VALUE key)
 {
-    char *s, *e;
+    const char *s, *e;
 
-    s = StringValuePtr(key);
-    if (memchr(s, '\0', RSTRING_LEN(key)))
-	rb_raise(rb_eArgError, "bad environment variable name");
+    s = env_name(key);
     e = getenv(s);
     if (e) return rb_assoc_new(key, rb_tainted_str_new2(e));
     return Qnil;
@@ -3391,6 +3514,7 @@ env_has_value(VALUE dmy, VALUE obj)
 
     obj = rb_check_string_type(obj);
     if (NIL_P(obj)) return Qnil;
+    rb_check_safe_obj(obj);
     env = GET_ENVIRON(environ);
     while (*env) {
 	char *s = strchr(*env, '=');
@@ -3421,6 +3545,7 @@ env_rassoc(VALUE dmy, VALUE obj)
 
     obj = rb_check_string_type(obj);
     if (NIL_P(obj)) return Qnil;
+    rb_check_safe_obj(obj);
     env = GET_ENVIRON(environ);
     while (*env) {
 	char *s = strchr(*env, '=');
@@ -3451,7 +3576,7 @@ env_key(VALUE dmy, VALUE value)
     char **env;
     VALUE str;
 
-    StringValue(value);
+    SafeStringValue(value);
     env = GET_ENVIRON(environ);
     while (*env) {
 	char *s = strchr(*env, '=');
@@ -3535,6 +3660,7 @@ static VALUE
 env_shift(void)
 {
     char **env;
+    VALUE result = Qnil;
 
     env = GET_ENVIRON(environ);
     if (*env) {
@@ -3543,11 +3669,11 @@ env_shift(void)
 	    VALUE key = env_str_new(*env, s-*env);
 	    VALUE val = env_str_new2(getenv(RSTRING_PTR(key)));
 	    env_delete(Qnil, key);
-	    return rb_assoc_new(key, val);
+	    result = rb_assoc_new(key, val);
 	}
     }
     FREE_ENVIRON(environ);
-    return Qnil;
+    return result;
 }
 
 /*
@@ -3794,7 +3920,7 @@ Init_Hash(void)
     rb_define_method(rb_cHash,"values_at", rb_hash_values_at, -1);
 
     rb_define_method(rb_cHash,"shift", rb_hash_shift, 0);
-    rb_define_method(rb_cHash,"delete", rb_hash_delete, 1);
+    rb_define_method(rb_cHash,"delete", rb_hash_delete_m, 1);
     rb_define_method(rb_cHash,"delete_if", rb_hash_delete_if, 0);
     rb_define_method(rb_cHash,"keep_if", rb_hash_keep_if, 0);
     rb_define_method(rb_cHash,"select", rb_hash_select, 0);
@@ -3820,6 +3946,8 @@ Init_Hash(void)
 
     rb_define_method(rb_cHash,"compare_by_identity", rb_hash_compare_by_id, 0);
     rb_define_method(rb_cHash,"compare_by_identity?", rb_hash_compare_by_id_p, 0);
+
+    rb_define_method(rb_cHash, "any?", rb_hash_any_p, 0);
 
     /* Document-class: ENV
      *

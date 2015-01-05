@@ -1,7 +1,6 @@
 # -*- coding: us-ascii -*-
 require 'test/unit'
-require 'continuation'
-require_relative 'envutil'
+EnvUtil.suppress_warning {require 'continuation'}
 
 class TestHash < Test::Unit::TestCase
 
@@ -217,9 +216,9 @@ class TestHash < Test::Unit::TestCase
 
   def test_AREF_fstring_key
     h = {"abc" => 1}
-    before = GC.stat(:total_allocated_object)
+    before = GC.stat(:total_allocated_objects)
     5.times{ h["abc"] }
-    assert_equal before, GC.stat(:total_allocated_object)
+    assert_equal before, GC.stat(:total_allocated_objects)
   end
 
   def test_ASET_fstring_key
@@ -1088,6 +1087,17 @@ class TestHash < Test::Unit::TestCase
     assert_predicate(h.dup, :compare_by_identity?, bug8703)
   end
 
+  def test_same_key
+    bug9646 = '[ruby-dev:48047] [Bug #9646] Infinite loop at Hash#each'
+    h = @cls[a=[], 1]
+    a << 1
+    h[[]] = 2
+    a.clear
+    cnt = 0
+    r = h.each{ break nil if (cnt+=1) > 100 }
+    assert_not_nil(r,bug9646)
+  end
+
   class ObjWithHash
     def initialize(value, hash)
       @value = value
@@ -1256,6 +1266,17 @@ class TestHash < Test::Unit::TestCase
 
     hash = {5 => bug9381}
     assert_equal(bug9381, hash[wrapper.new(5)])
+  end
+
+  def test_label_syntax
+    return unless @cls == Hash
+
+    feature4935 = '[ruby-core:37553] [Feature #4935]'
+    x = 'world'
+    hash = assert_nothing_raised(SyntaxError) do
+      break eval(%q({foo: 1, "foo-bar": 2, "hello-#{x}": 3, 'hello-#{x}': 4, 'bar': {}}))
+    end
+    assert_equal({:foo => 1, :'foo-bar' => 2, :'hello-world' => 3, :'hello-#{x}' => 4, :bar => {}}, hash)
   end
 
   class TestSubHash < TestHash

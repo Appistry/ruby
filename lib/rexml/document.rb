@@ -123,7 +123,7 @@ module REXML
     def xml_decl
       rv = @children[0]
       return rv if rv.kind_of? XMLDecl
-      rv = @children.unshift(XMLDecl.default)[0]
+      @children.unshift(XMLDecl.default)[0]
     end
 
     # @return the XMLDecl version of this document as a String.
@@ -276,6 +276,10 @@ module REXML
       if @entity_expansion_count > Security.entity_expansion_limit
         raise "number of entity expansions exceeded, processing aborted."
       end
+    end
+
+    def document
+      self
     end
 
     private

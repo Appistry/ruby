@@ -11,10 +11,6 @@ class Test_SPrintf < Test::Unit::TestCase
     "<#{self.class}:#{object_id}>"
   end
 
-  def test_int
-    assert_match(/\A<-?\d+>\z/, Bug::Printf.i(self))
-  end
-
   def test_to_str
     assert_equal("<#{self.class}:#{object_id}>", Bug::Printf.s(self))
   end
@@ -181,4 +177,10 @@ class Test_SPrintf < Test::Unit::TestCase
                                             zero: zr, width: width,
                                             prec: prec))
   }
+
+  def test_string_prec
+    assert_equal("a", Bug::Printf.("s", "a", prec: 3)[0])
+    assert_equal("  a", Bug::Printf.("s", "a", width: 3, prec: 3)[0])
+    assert_equal("a  ", Bug::Printf.("s", "a", minus: true, width: 3, prec: 3)[0])
+  end
 end

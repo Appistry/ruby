@@ -1,7 +1,6 @@
 # -*- coding: us-ascii -*-
 require 'test/unit'
 require 'thread'
-require_relative 'envutil'
 
 class TestThread < Test::Unit::TestCase
   class Thread < ::Thread
@@ -25,6 +24,13 @@ class TestThread < Test::Unit::TestCase
       rescue Exception
       end
     end
+  end
+
+  def test_inspect
+    th = Module.new {break module_eval("class C\u{30b9 30ec 30c3 30c9} < Thread; self; end")}.start{}
+    assert_match(/::C\u{30b9 30ec 30c3 30c9}:/, th.inspect)
+  ensure
+    th.join
   end
 
   def test_main_thread_variable_in_enumerator
@@ -117,7 +123,6 @@ class TestThread < Test::Unit::TestCase
     dir = File.dirname(__FILE__)
     lbtest = File.join(dir, "lbtest.rb")
     $:.unshift File.join(File.dirname(dir), 'ruby')
-    require 'envutil'
     $:.shift
     3.times {
       `#{EnvUtil.rubybin} #{lbtest}`
@@ -362,6 +367,24 @@ class TestThread < Test::Unit::TestCase
     c.kill if c
   end
 
+  def test_switch_while_busy_loop
+    bug1402 = "[ruby-dev:38319] [Bug #1402]"
+    flag = true
+    th = Thread.current
+    waiter = Thread.start {
+      sleep 0.1
+      flag = false
+      sleep 1
+      th.raise(bug1402)
+    }
+    assert_nothing_raised(RuntimeError, bug1402) do
+      nil while flag
+    end
+    assert(!flag, bug1402)
+  ensure
+    waiter.kill.join
+  end
+
   def test_safe_level
     ok = false
     t = Thread.new do
@@ -407,6 +430,16 @@ class TestThread < Test::Unit::TestCase
         Thread.current[:foo] = :baz
       end.join
     end
+  end
+
+  def test_thread_local_dynamic_symbol
+    bug10667 = '[ruby-core:67185] [Bug #10667]'
+    t = Thread.new {}.join
+    key_str = "foo#{rand}"
+    key_sym = key_str.to_sym
+    t.thread_variable_set(key_str, "bar")
+    assert_equal("bar", t.thread_variable_get(key_str), "#{bug10667}: string key")
+    assert_equal("bar", t.thread_variable_get(key_sym), "#{bug10667}: symbol key")
   end
 
   def test_select_wait
@@ -730,7 +763,7 @@ _eom
     bug5757 = '[ruby-dev:44985]'
     t0 = Time.now.to_f
     pid = nil
-    cmd = 'r,=IO.pipe; Thread.start {Thread.pass until Thread.main.stop?; puts; STDOUT.flush}; r.read'
+    cmd = 'Signal.trap(:INT, "DEFAULT"); r,=IO.pipe; Thread.start {Thread.pass until Thread.main.stop?; puts; STDOUT.flush}; r.read'
     opt = {}
     opt[:new_pgroup] = true if /mswin|mingw/ =~ RUBY_PLATFORM
     s, _err = EnvUtil.invoke_ruby(['-e', cmd], "", true, true, opt) do |in_p, out_p, err_p, cpid|
@@ -750,6 +783,7 @@ _eom
 
   def test_thread_join_in_trap
     assert_separately [], <<-'EOS'
+    Signal.trap(:INT, "DEFAULT")
     t0 = Thread.current
     assert_nothing_raised{
       t = Thread.new {Thread.pass until t0.stop?; Process.kill(:INT, $$)}
@@ -765,6 +799,7 @@ _eom
 
   def test_thread_value_in_trap
     assert_separately [], <<-'EOS'
+    Signal.trap(:INT, "DEFAULT")
     t0 = Thread.current
     t = Thread.new {Thread.pass until t0.stop?; Process.kill(:INT, $$); :normal_end}
 
@@ -790,14 +825,20 @@ _eom
   end
 
   def test_main_thread_status_at_exit
-    assert_in_out_err([], <<-INPUT, %w(false), [])
+    assert_in_out_err([], <<-'INPUT', ["false false aborting"], [])
+require 'thread'
+q = Queue.new
 Thread.new(Thread.current) {|mth|
   begin
-    Thead.pass until mth.stop?
+    q.push nil
+    mth.run
+    Thread.pass until mth.stop?
+    p :mth_stopped # don't run if killed by rb_thread_terminate_all
   ensure
-    p mth.alive?
+    puts "#{mth.alive?} #{mth.status} #{Thread.current.status}"
   end
 }
+q.pop
     INPUT
   end
 
@@ -970,5 +1011,26 @@ Thread.new(Thread.current) {|mth|
 
     pid, status = Process.waitpid2(pid)
     assert_equal(false, status.success?, bug8433)
+  end if Process.respond_to?(:fork)
+
+  def test_fork_in_thread
+    bug9751 = '[ruby-core:62070] [Bug #9751]'
+    f = nil
+    th = Thread.start do
+      unless f = IO.popen("-")
+        STDERR.reopen(STDOUT)
+        exit
+      end
+      Process.wait2(f.pid)
+    end
+    unless th.join(3)
+      Process.kill(:QUIT, f.pid)
+      Process.kill(:KILL, f.pid) unless th.join(1)
+    end
+    _, status = th.value
+    output = f.read
+    f.close
+    assert_not_predicate(status, :signaled?, FailDesc[status, bug9751, output])
+    assert_predicate(status, :success?, bug9751)
   end if Process.respond_to?(:fork)
 end

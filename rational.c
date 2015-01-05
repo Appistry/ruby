@@ -5,7 +5,6 @@
   which is written in ruby.
 */
 
-#include "ruby.h"
 #include "internal.h"
 #include <math.h>
 #include <float.h>
@@ -273,7 +272,7 @@ k_rational_p(VALUE x)
 VALUE
 rb_gcd_gmp(VALUE x, VALUE y)
 {
-    const size_t nails = (sizeof(BDIGIT)-SIZEOF_BDIGITS)*CHAR_BIT;
+    const size_t nails = (sizeof(BDIGIT)-SIZEOF_BDIGIT)*CHAR_BIT;
     mpz_t mx, my, mz;
     size_t count;
     VALUE z;
@@ -287,7 +286,7 @@ rb_gcd_gmp(VALUE x, VALUE y)
 
     mpz_gcd(mz, mx, my);
 
-    zn = (mpz_sizeinbase(mz, 16) + SIZEOF_BDIGITS*2 - 1) / (SIZEOF_BDIGITS*2);
+    zn = (mpz_sizeinbase(mz, 16) + SIZEOF_BDIGIT*2 - 1) / (SIZEOF_BDIGIT*2);
     z = rb_big_new(zn, 1);
     mpz_export(BIGNUM_DIGITS(z), &count, -1, sizeof(BDIGIT), 0, nails, mz);
 
@@ -363,8 +362,8 @@ f_gcd(VALUE x, VALUE y)
 {
 #ifdef USE_GMP
     if (RB_TYPE_P(x, T_BIGNUM) && RB_TYPE_P(y, T_BIGNUM)) {
-        long xn = BIGNUM_LEN(x);
-        long yn = BIGNUM_LEN(y);
+        size_t xn = BIGNUM_LEN(x);
+        size_t yn = BIGNUM_LEN(y);
         if (GMP_GCD_DIGITS <= xn || GMP_GCD_DIGITS <= yn)
             return rb_gcd_gmp(x, y);
     }
@@ -403,6 +402,9 @@ f_lcm(VALUE x, VALUE y)
     struct RRational *adat, *bdat;\
     adat = ((struct RRational *)(x));\
     bdat = ((struct RRational *)(y))
+
+#define RRATIONAL_SET_NUM(rat, n) RB_OBJ_WRITE((rat), &((struct RRational *)(rat))->num,(n))
+#define RRATIONAL_SET_DEN(rat, d) RB_OBJ_WRITE((rat), &((struct RRational *)(rat))->den,(d))
 
 inline static VALUE
 nurat_s_new_internal(VALUE klass, VALUE num, VALUE den)
@@ -1775,6 +1777,18 @@ rb_Rational(VALUE x, VALUE y)
     return nurat_s_convert(2, a, rb_cRational);
 }
 
+VALUE
+rb_rational_num(VALUE rat)
+{
+    return nurat_numerator(rat);
+}
+
+VALUE
+rb_rational_den(VALUE rat)
+{
+    return nurat_denominator(rat);
+}
+
 #define id_numerator rb_intern("numerator")
 #define f_numerator(x) rb_funcall((x), id_numerator, 0)
 
@@ -2136,13 +2150,14 @@ read_digits(const char **s, int strict,
 {
     char *b, *bb;
     int us = 1, ret = 1;
+    VALUE tmp;
 
     if (!isdecimal(**s)) {
 	*num = ZERO;
 	return 0;
     }
 
-    bb = b = ALLOCA_N(char, strlen(*s) + 1);
+    bb = b = ALLOCV_N(char, tmp, strlen(*s) + 1);
 
     while (isdecimal(**s) || **s == '_') {
 	if (**s == '_') {
@@ -2169,6 +2184,7 @@ read_digits(const char **s, int strict,
   conv:
     *b = '\0';
     *num = rb_cstr_to_inum(bb, 10, 0);
+    ALLOCV_END(tmp);
     return ret;
 }
 
@@ -2597,6 +2613,8 @@ Init_Rational(void)
     rb_define_method(rb_cString, "to_r", string_to_r, 0);
 
     rb_define_private_method(CLASS_OF(rb_cRational), "convert", nurat_s_convert, -1);
+
+    rb_provide("rational.so");	/* for backward compatibility */
 }
 
 /*

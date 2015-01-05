@@ -1,5 +1,5 @@
 require 'test/unit'
-require 'continuation'
+EnvUtil.suppress_warning {require 'continuation'}
 require 'stringio'
 
 class TestEnumerable < Test::Unit::TestCase
@@ -151,6 +151,7 @@ class TestEnumerable < Test::Unit::TestCase
     assert_equal(12, @obj.inject(:*))
     assert_equal(24, @obj.inject(2) {|z, x| z * x })
     assert_equal(24, @obj.inject(2, :*) {|z, x| z * x })
+    assert_equal(nil, @empty.inject() {9})
   end
 
   def test_partition
@@ -245,8 +246,8 @@ class TestEnumerable < Test::Unit::TestCase
     assert_equal("horse", ary.max)
     assert_equal("albatross", ary.max {|a,b| a.length <=> b.length })
     assert_equal(1, [3,2,1].max{|a,b| b <=> a })
-    assert_equal(%w[dog horse], ary.max(2))
-    assert_equal(%w[horse albatross],
+    assert_equal(%w[horse dog], ary.max(2))
+    assert_equal(%w[albatross horse],
                  ary.max(2) {|a,b| a.length <=> b.length })
   end
 
@@ -278,7 +279,7 @@ class TestEnumerable < Test::Unit::TestCase
     a = %w(albatross dog horse)
     assert_equal("albatross", a.max_by {|x| x.length })
     assert_equal(1, [2,3,1].max_by {|x| -x })
-    assert_equal(%w[horse albatross], a.max_by(2) {|x| x.length })
+    assert_equal(%w[albatross horse], a.max_by(2) {|x| x.length })
   end
 
   def test_minmax_by
@@ -336,6 +337,28 @@ class TestEnumerable < Test::Unit::TestCase
     cond = ->(x, i) { a << x }
     @obj.each_with_index.each_entry(&cond)
     assert_equal([1, 2, 3, 1, 2], a)
+  end
+
+  def test_each_slice
+    ary = []
+    (1..10).each_slice(3) {|a| ary << a}
+    assert_equal([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10]], ary)
+
+    bug9749 = '[ruby-core:62060] [Bug #9749]'
+    ary.clear
+    (1..10).each_slice(3, &lambda {|a, *| ary << a})
+    assert_equal([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10]], ary, bug9749)
+  end
+
+  def test_each_cons
+    ary = []
+    (1..5).each_cons(3) {|a| ary << a}
+    assert_equal([[1, 2, 3], [2, 3, 4], [3, 4, 5]], ary)
+
+    bug9749 = '[ruby-core:62060] [Bug #9749]'
+    ary.clear
+    (1..5).each_cons(3, &lambda {|a, *| ary << a})
+    assert_equal([[1, 2, 3], [2, 3, 4], [3, 4, 5]], ary, bug9749)
   end
 
   def test_zip
@@ -509,6 +532,104 @@ class TestEnumerable < Test::Unit::TestCase
     assert_not_warn{ss.slice_before(/\A...\z/).to_a}
   end
 
+  def test_slice_after0
+    assert_raise(ArgumentError) { [].slice_after }
+  end
+
+  def test_slice_after1
+    e = [].slice_after {|a| flunk "should not be called" }
+    assert_equal([], e.to_a)
+
+    e = [1,2].slice_after(1)
+    assert_equal([[1], [2]], e.to_a)
+
+    e = [1,2].slice_after(3)
+    assert_equal([[1, 2]], e.to_a)
+
+    [true, false].each {|b|
+      block_results = [true, b]
+      e = [1,2].slice_after {|a| block_results.shift }
+      assert_equal([[1], [2]], e.to_a)
+      assert_equal([], block_results)
+
+      block_results = [false, b]
+      e = [1,2].slice_after {|a| block_results.shift }
+      assert_equal([[1, 2]], e.to_a)
+      assert_equal([], block_results)
+    }
+  end
+
+  def test_slice_after_both_pattern_and_block
+    assert_raise(ArgumentError) { [].slice_after(1) {|a| true } }
+  end
+
+  def test_slice_after_continuation_lines
+    lines = ["foo\n", "bar\\\n", "baz\n", "\n", "qux\n"]
+    e = lines.slice_after(/[^\\]\n\z/)
+    assert_equal([["foo\n"], ["bar\\\n", "baz\n"], ["\n", "qux\n"]], e.to_a)
+  end
+
+  def test_slice_before_empty_line
+    lines = ["foo", "", "bar"]
+    e = lines.slice_after(/\A\s*\z/)
+    assert_equal([["foo", ""], ["bar"]], e.to_a)
+  end
+
+  def test_slice_when_0
+    e = [].slice_when {|a, b| flunk "should not be called" }
+    assert_equal([], e.to_a)
+  end
+
+  def test_slice_when_1
+    e = [1].slice_when {|a, b| flunk "should not be called" }
+    assert_equal([[1]], e.to_a)
+  end
+
+  def test_slice_when_2
+    e = [1,2].slice_when {|a,b|
+      assert_equal(1, a)
+      assert_equal(2, b)
+      true
+    }
+    assert_equal([[1], [2]], e.to_a)
+
+    e = [1,2].slice_when {|a,b|
+      assert_equal(1, a)
+      assert_equal(2, b)
+      false
+    }
+    assert_equal([[1, 2]], e.to_a)
+  end
+
+  def test_slice_when_3
+    block_invocations = [
+      lambda {|a, b|
+        assert_equal(1, a)
+        assert_equal(2, b)
+        true
+      },
+      lambda {|a, b|
+        assert_equal(2, a)
+        assert_equal(3, b)
+        false
+      }
+    ]
+    e = [1,2,3].slice_when {|a,b|
+      block_invocations.shift.call(a, b)
+    }
+    assert_equal([[1], [2, 3]], e.to_a)
+    assert_equal([], block_invocations)
+  end
+
+  def test_slice_when_noblock
+    assert_raise(ArgumentError) { [].slice_when }
+  end
+
+  def test_slice_when_contiguously_increasing_integers
+    e = [1,4,9,10,11,12,15,16,19,20,21].slice_when {|i, j| i+1 != j }
+    assert_equal([[1], [4], [9,10,11,12], [15,16], [19,20,21]], e.to_a)
+  end
+
   def test_detect
     @obj = ('a'..'z')
     assert_equal('c', @obj.detect {|x| x == 'c' })
@@ -569,5 +690,27 @@ class TestEnumerable < Test::Unit::TestCase
     lambda2 = ->(x, i) { [x.upcase, i] }
     assert_equal([['A',0], ['B',1], ['C',2], ['D',3], ['E',4]],
       @obj.each_with_index.map(&lambda2))
+  end
+
+  def test_flat_map
+    @obj = [[1,2], [3,4]]
+    assert_equal([2,4,6,8], @obj.flat_map {|i| i.map{|j| j*2} })
+
+    proc = Proc.new {|i| i.map{|j| j*2} }
+    assert_equal([2,4,6,8], @obj.flat_map(&proc))
+
+    lambda = ->(i) { i.map{|j| j*2} }
+    assert_equal([2,4,6,8], @obj.flat_map(&lambda))
+
+    assert_equal([[1,2],0,[3,4],1],
+                 @obj.each_with_index.flat_map {|x, i| [x,i] })
+
+    proc2 = Proc.new {|x, i| [x,i] }
+    assert_equal([[1,2],0,[3,4],1],
+                 @obj.each_with_index.flat_map(&proc2))
+
+    lambda2 = ->(x, i) { [x,i] }
+    assert_equal([[1,2],0,[3,4],1],
+                 @obj.each_with_index.flat_map(&lambda2))
   end
 end

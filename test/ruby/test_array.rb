@@ -1,6 +1,5 @@
 # coding: US-ASCII
 require 'test/unit'
-require_relative 'envutil'
 
 class TestArray < Test::Unit::TestCase
   def setup
@@ -806,7 +805,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_flatten_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     o = Object.new
     def o.to_ary() callcc {|k| @cont = k; [1,2,3]} end
     begin
@@ -820,7 +819,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_permutation_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = [1,2,3]
@@ -837,7 +836,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_product_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = [1,2,3]
@@ -854,7 +853,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_combination_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = [1,2,3]
@@ -871,7 +870,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_repeated_permutation_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = [1,2,3]
@@ -888,7 +887,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_repeated_combination_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = [1,2,3]
@@ -1366,7 +1365,7 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_sort_with_callcc
-    respond_to?(:callcc, true) or require 'continuation'
+    need_continuation
     n = 1000
     cont = nil
     ary = (1..100).to_a
@@ -1748,6 +1747,13 @@ class TestArray < Test::Unit::TestCase
 
     bug3708 = '[ruby-dev:42067]'
     assert_equal(b, @cls[0, 1, 2, 3, 4][1, 4].permutation.to_a, bug3708)
+
+    bug9932 = '[ruby-core:63103] [Bug #9932]'
+    assert_separately([], <<-"end;") #    do
+      assert_nothing_raised(SystemStackError, "#{bug9932}") do
+        assert_equal(:ok, Array.new(100_000, nil).permutation {break :ok})
+      end
+    end;
   end
 
   def test_repeated_permutation
@@ -1773,6 +1779,12 @@ class TestArray < Test::Unit::TestCase
 
     a = @cls[0, 1, 2, 3, 4][1, 4].repeated_permutation(2)
     assert_empty(a.reject {|x| !x.include?(0)})
+
+    assert_separately([], <<-"end;") #    do
+      assert_nothing_raised(SystemStackError) do
+        assert_equal(:ok, Array.new(100_000, nil).repeated_permutation(500_000) {break :ok})
+      end
+    end;
   end
 
   def test_repeated_combination
@@ -1802,6 +1814,12 @@ class TestArray < Test::Unit::TestCase
 
     a = @cls[0, 1, 2, 3, 4][1, 4].repeated_combination(2)
     assert_empty(a.reject {|x| !x.include?(0)})
+
+    assert_separately([], <<-"end;") #    do
+      assert_nothing_raised(SystemStackError) do
+        assert_equal(:ok, Array.new(100_000, nil).repeated_combination(500_000) {break :ok})
+      end
+    end;
   end
 
   def test_take
@@ -1886,6 +1904,8 @@ class TestArray < Test::Unit::TestCase
     a[3] = 3
     a.shift(2)
     assert_equal([2, 3], a)
+
+    assert_equal([1,1,1], ([1] * 100).shift(3))
   end
 
   def test_unshift_error
@@ -2009,6 +2029,22 @@ class TestArray < Test::Unit::TestCase
 
   def test_reject
     assert_equal([1, 3], [0, 1, 2, 3].reject {|x| x % 2 == 0 })
+  end
+
+  def test_reject_with_callcc
+    need_continuation
+    bug9727 = '[ruby-dev:48101] [Bug #9727]'
+    cont = nil
+    a = [*1..10].reject do |i|
+      callcc {|c| cont = c} if !cont and i == 10
+      false
+    end
+    if a.size < 1000
+      a.unshift(:x)
+      cont.call
+    end
+    assert_equal(1000, a.size, bug9727)
+    assert_equal([:x, *1..10], a.uniq, bug9727)
   end
 
   def test_zip
@@ -2275,6 +2311,15 @@ class TestArray < Test::Unit::TestCase
     assert_equal(:called, (0..100).to_a.combination(50) { break :called }, "[ruby-core:29240] ... must be yielded even if 100C50 > signed integer")
   end
 
+  def test_combination_clear
+    bug9939 = '[ruby-core:63149] [Bug #9939]'
+    assert_separately([], <<-'end;')
+      100_000.times {Array.new(1000)}
+      a = [*0..100]
+      a.combination(3) {|*,x| a.clear}
+    end;
+  end
+
   def test_product2
     a = (0..100).to_a
     assert_raise(RangeError) do
@@ -2313,6 +2358,11 @@ class TestArray < Test::Unit::TestCase
     b.replace(a)
     assert_equal((1..10).to_a, a.shift(10))
     assert_equal((11..100).to_a, a)
+
+    a = (1..30).to_a
+    assert_equal((1..3).to_a, a.shift(3))
+    # occupied
+    assert_equal((4..6).to_a, a.shift(3))
   end
 
   def test_replace_shared_ary
@@ -2430,24 +2480,33 @@ class TestArray < Test::Unit::TestCase
   end
 
   def test_shared_marking
-    assert_normal_exit <<-EOS, '[Bug #9718]'
+    reduce = proc do |s|
+      s.gsub(/(verify_internal_consistency_reachable_i:\sWB\smiss\s\S+\s\(T_ARRAY\)\s->\s)\S+\s\((proc|T_NONE)\)\n
+             \K(?:\1\S+\s\(\2\)\n)*/x) do
+        "...(snip #{$&.count("\n")} lines)...\n"
+      end
+    end
     begin
-      require 'timeout'
-      timeout(5) do
-        queue = []
-        i = 0
-        srand(0)
-        loop do
-          if (i+=1) > rand(100_000)
-            GC.verify_internal_consistency
-            queue.shift.call
-            i = 0
-          end
+      assert_normal_exit(<<-EOS, '[Bug #9718]', timeout: 5, stdout_filter: reduce)
+      queue = []
+      50.times do
+        10_000.times do
           queue << lambda{}
         end
+        GC.start(full_mark: false, immediate_sweep: true)
+        GC.verify_internal_consistency
+        queue.shift.call
       end
-    rescue TimeoutError
-    end
     EOS
+    rescue Timeout::Error => e
+      skip e.message
+    end
+  end
+
+  private
+  def need_continuation
+    unless respond_to?(:callcc, true)
+      EnvUtil.suppress_warning {require 'continuation'}
+    end
   end
 end

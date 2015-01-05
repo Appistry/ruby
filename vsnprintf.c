@@ -806,7 +806,21 @@ reswitch:	switch (ch) {
 #else
 # define INTPTR_FLAG 0
 #endif
-			if (fp->vextra && (flags & INTPTR_MASK) == INTPTR_FLAG) {
+#ifdef PRI_EXTRA_MARK
+# define PRI_EXTRA_MARK_LEN (sizeof(PRI_EXTRA_MARK)-1)
+# define IS_PRI_EXTRA_MARK(s) \
+	(PRI_EXTRA_MARK_LEN < 1 || \
+	 (*(s) == PRI_EXTRA_MARK[0] && \
+	  (PRI_EXTRA_MARK_LEN == 1 || \
+	   strncmp((s)+1, PRI_EXTRA_MARK+1, \
+		   PRI_EXTRA_MARK_LEN-1) == 0)))
+#else
+# define PRI_EXTRA_MARK_LEN 0
+# define IS_PRI_EXTRA_MARK(s) 1
+#endif
+			if (fp->vextra && (flags & INTPTR_MASK) == INTPTR_FLAG &&
+			    IS_PRI_EXTRA_MARK(fmt)) {
+				fmt += PRI_EXTRA_MARK_LEN;
 				FLUSH();
 #if defined _HAVE_SANE_QUAD_ && SIZEOF_VOIDP == SIZEOF_LONG_LONG
 				uqval = va_arg(ap, u_quad_t);
@@ -993,7 +1007,7 @@ fp_begin:		_double = va_arg(ap, double);
 				 */
 				const char *p = (char *)memchr(cp, 0, prec);
 
-				if (p != NULL && (p - cp) > prec)
+				if (p != NULL && (p - cp) < prec)
 					size = (int)(p - cp);
 				else
 					size = prec;

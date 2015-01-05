@@ -1,5 +1,4 @@
 require 'test/unit'
-require_relative 'envutil'
 
 class TestSymbol < Test::Unit::TestCase
   # [ruby-core:3573]
@@ -208,17 +207,35 @@ class TestSymbol < Test::Unit::TestCase
     assert_equal(true, :foo.to_sym.frozen?)
   end
 
-  def test_sym_find
-    assert_separately(%w[--disable=gems], <<-"end;")
-      assert_equal :intern, Symbol.find("intern")
-      assert_raise(TypeError){ Symbol.find(true) }
+  def test_symbol_gc_1
+    assert_normal_exit('".".intern;GC.start(immediate_sweep:false);eval %[GC.start;".".intern]',
+                       '',
+                       child_env: '--disable-gems')
+    assert_normal_exit('".".intern;GC.start(immediate_sweep:false);eval %[GC.start;:"."]',
+                       '',
+                       child_env: '--disable-gems')
+    assert_normal_exit('".".intern;GC.start(immediate_sweep:false);eval %[GC.start;%i"."]',
+                       '',
+                       child_env: '--disable-gems')
+    assert_normal_exit('tap{".".intern};GC.start(immediate_sweep:false);' +
+                       'eval %[syms=Symbol.all_symbols;GC.start;syms.each(&:to_sym)]',
+                       '',
+                       child_env: '--disable-gems')
+  end
 
-      str = "__noexistent__"
-      assert_equal nil, Symbol.find(str)
-      assert_equal nil, Symbol.find(str)
-      sym = str.intern
-      assert_equal str, sym.to_s
-      assert_equal sym, Symbol.find(str)
+  def test_dynamic_attrset_id
+    bug10259 = '[ruby-dev:48559] [Bug #10259]'
+    class << (obj = Object.new)
+      attr_writer :unagi
+    end
+    assert_nothing_raised(NoMethodError, bug10259) {obj.send("unagi=".intern, 1)}
+  end
+
+  def test_symbol_fstr_leak
+    bug10686 = '[ruby-core:67268] [Bug #10686]'
+    x = 0
+    assert_no_memory_leak([], '', <<-"end;", bug10686)
+      200_000.times { |i| i.to_s.to_sym }
     end;
   end
 end

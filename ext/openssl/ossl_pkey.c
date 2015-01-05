@@ -69,9 +69,23 @@ ossl_generate_cb_stop(void *ptr)
 }
 #endif
 
+static void
+ossl_evp_pkey_free(void *ptr)
+{
+    EVP_PKEY_free(ptr);
+}
+
 /*
  * Public
  */
+const rb_data_type_t ossl_evp_pkey_type = {
+    "OpenSSL/EVP_PKEY",
+    {
+	0, ossl_evp_pkey_free,
+    },
+    0, 0, RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
 VALUE
 ossl_pkey_new(EVP_PKEY *pkey)
 {
@@ -318,13 +332,16 @@ ossl_pkey_verify(VALUE self, VALUE digest, VALUE sig, VALUE data)
 {
     EVP_PKEY *pkey;
     EVP_MD_CTX ctx;
+    int result;
 
     GetPKey(self, pkey);
-    EVP_VerifyInit(&ctx, GetDigestPtr(digest));
     StringValue(sig);
     StringValue(data);
+    EVP_VerifyInit(&ctx, GetDigestPtr(digest));
     EVP_VerifyUpdate(&ctx, RSTRING_PTR(data), RSTRING_LEN(data));
-    switch (EVP_VerifyFinal(&ctx, (unsigned char *)RSTRING_PTR(sig), RSTRING_LENINT(sig), pkey)) {
+    result = EVP_VerifyFinal(&ctx, (unsigned char *)RSTRING_PTR(sig), RSTRING_LENINT(sig), pkey);
+    EVP_MD_CTX_cleanup(&ctx);
+    switch (result) {
     case 0:
 	return Qfalse;
     case 1:
@@ -339,7 +356,7 @@ ossl_pkey_verify(VALUE self, VALUE digest, VALUE sig, VALUE data)
  * INIT
  */
 void
-Init_ossl_pkey()
+Init_ossl_pkey(void)
 {
 #if 0
     mOSSL = rb_define_module("OpenSSL"); /* let rdoc know about mOSSL */

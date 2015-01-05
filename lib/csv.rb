@@ -238,10 +238,10 @@ class CSV
       headers.each { |h| h.freeze if h.is_a? String }
 
       # handle extra headers or fields
-      @row = if headers.size > fields.size
+      @row = if headers.size >= fields.size
         headers.zip(fields)
       else
-        fields.zip(headers).map { |pair| pair.reverse }
+        fields.zip(headers).map { |pair| pair.reverse! }
       end
     end
 
@@ -1148,9 +1148,9 @@ class CSV
       io.seek(0, IO::SEEK_END)
       args.unshift(io)
     else
-      encoding = (args[-1] = args[-1].dup).delete(:encoding) if args.last.is_a?(Hash)
+      encoding = args[-1][:encoding] if args.last.is_a?(Hash)
       str      = ""
-      str.encode!(encoding) if encoding
+      str.force_encoding(encoding) if encoding
       args.unshift(str)
     end
     csv = new(*args)  # wrap
@@ -1260,7 +1260,12 @@ class CSV
       file_opts = {encoding: Encoding.default_external}.merge(file_opts)
       retry
     end
-    csv = new(f, options)
+    begin
+      csv = new(f, options)
+    rescue Exception
+      f.close
+      raise
+    end
 
     # handle blocks like Ruby's open(), not like the CSV library
     if block_given?
@@ -1465,7 +1470,15 @@ class CSV
   #                                       if the data cannot be transcoded,
   #                                       leaving the header unchanged.
   # <b><tt>:skip_blanks</tt></b>::        When set to a +true+ value, CSV will
-  #                                       skip over any rows with no content.
+  #                                       skip over any empty rows. Note that
+  #                                       this setting will not skip rows that
+  #                                       contain column separators, even if
+  #                                       the rows contain no actual data. If
+  #                                       you want to skip rows that contain
+  #                                       separators but no content, consider
+  #                                       using <tt>:skip_lines</tt>, or
+  #                                       inspecting fields.compact.empty? on
+  #                                       each row.
   # <b><tt>:force_quotes</tt></b>::       When set to a +true+ value, CSV will
   #                                       quote all CSV fields it creates.
   # <b><tt>:skip_lines</tt></b>::         When set to an object responding to
@@ -1484,6 +1497,10 @@ class CSV
   # so be sure to set what you want here.
   #
   def initialize(data, options = Hash.new)
+    if data.nil?
+      raise ArgumentError.new("Cannot parse nil as CSV")
+    end
+
     # build the options for this read/write
     options = DEFAULT_OPTIONS.merge(options)
 
@@ -1515,7 +1532,7 @@ class CSV
     init_headers(options)
     init_comments(options)
 
-    options.delete(:encoding)
+    @force_encoding = !!(encoding || options.delete(:encoding))
     options.delete(:internal_encoding)
     options.delete(:external_encoding)
     unless options.empty?
@@ -1655,10 +1672,13 @@ class CSV
 
     output = row.map(&@quote).join(@col_sep) + @row_sep  # quote and separate
     if @io.is_a?(StringIO)             and
-       output.encoding != raw_encoding and
-       (compatible_encoding = Encoding.compatible?(@io.string, output))
-      @io.set_encoding(compatible_encoding)
-      @io.seek(0, IO::SEEK_END)
+       output.encoding != (encoding = raw_encoding)
+      if @force_encoding
+        output = output.encode(encoding)
+      elsif (compatible_encoding = Encoding.compatible?(@io.string, output))
+        @io.set_encoding(compatible_encoding)
+        @io.seek(0, IO::SEEK_END)
+      end
     end
     @io << output
 

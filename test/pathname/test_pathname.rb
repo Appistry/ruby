@@ -5,7 +5,6 @@ require 'fileutils'
 require 'tmpdir'
 require 'enumerator'
 
-require_relative '../ruby/envutil'
 
 class TestPathname < Test::Unit::TestCase
   def self.define_assertion(name, linenum, &block)
@@ -88,6 +87,10 @@ class TestPathname < Test::Unit::TestCase
     defassert(:cleanpath_aggressive, '/',       '///a/../..')
   end
 
+  if DOSISH
+    defassert(:cleanpath_aggressive, 'c:/foo/bar', 'c:\\foo\\bar')
+  end
+
   def cleanpath_conservative(path)
     Pathname.new(path).cleanpath(true).to_s
   end
@@ -123,6 +126,10 @@ class TestPathname < Test::Unit::TestCase
   defassert(:cleanpath_conservative, 'a/..',   'a/../.')
   defassert(:cleanpath_conservative, '/a',     '/../.././../a')
   defassert(:cleanpath_conservative, 'a/b/../../../../c/../d', 'a/b/../../../../c/../d')
+
+  if DOSISH
+    defassert(:cleanpath_conservative, 'c:/foo/bar', 'c:\\foo\\bar')
+  end
 
   if DOSISH_UNC
     defassert(:cleanpath_conservative, '//',     '//')
@@ -212,6 +219,10 @@ class TestPathname < Test::Unit::TestCase
   defassert(:plus, '../../c', '..', '../c')
 
   defassert(:plus, 'a//b/d//e', 'a//b/c', '../d//e')
+
+  def test_slash
+    assert_kind_of(Pathname, Pathname("a") / Pathname("b"))
+  end
 
   def test_parent
     assert_equal(Pathname("."), Pathname("a").parent)
@@ -547,6 +558,11 @@ class TestPathname < Test::Unit::TestCase
     assert_include([true, false], r)
   end
 
+  def test_mountpoint_enoent
+    r = Pathname("/nonexistent").mountpoint?
+    assert_equal false, r
+  end
+
   def test_destructive_update
     path = Pathname.new("a")
     path.to_s.replace "b"
@@ -757,6 +773,14 @@ class TestPathname < Test::Unit::TestCase
 
   def test_atime
     assert_kind_of(Time, Pathname(__FILE__).atime)
+  end
+
+  def test_birthtime
+    assert_kind_of(Time, Pathname(__FILE__).birthtime)
+  rescue NotImplementedError
+    assert_raise(NotImplementedError) do
+      File.birthtime(__FILE__)
+    end
   end
 
   def test_ctime
@@ -1348,5 +1372,18 @@ class TestPathname < Test::Unit::TestCase
       $SAFE = 1
       assert_equal("foo/bar", File.join(Pathname.new("foo"), Pathname.new("bar").taint))
     }.call
+  end
+
+  def test_relative_path_from_casefold
+    assert_separately([], <<-'end;') #    do
+      module File::Constants
+        remove_const :FNM_SYSCASE
+        FNM_SYSCASE = FNM_CASEFOLD
+      end
+      require 'pathname'
+      foo = Pathname.new("fo\u{f6}")
+      bar = Pathname.new("b\u{e4}r".encode("ISO-8859-1"))
+      assert_instance_of(Pathname, foo.relative_path_from(bar))
+    end;
   end
 end

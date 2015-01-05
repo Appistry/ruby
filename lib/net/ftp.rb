@@ -103,7 +103,7 @@ module Net
     # Number of seconds to wait for one block to be read (via one read(2)
     # call). Any number may be used, including Floats for fractional
     # seconds. If the FTP object cannot read data in this many seconds,
-    # it raises a TimeoutError exception. The default value is 60 seconds.
+    # it raises a Timeout::Error exception. The default value is 60 seconds.
     attr_reader :read_timeout
 
     # Setter for the read_timeout attribute.
@@ -420,35 +420,38 @@ module Net
         end
       else
         sock = makeport
-        if @resume and rest_offset
-          resp = sendcmd("REST " + rest_offset.to_s)
-          if resp[0] != ?3
+        begin
+          if @resume and rest_offset
+            resp = sendcmd("REST " + rest_offset.to_s)
+            if resp[0] != ?3
+              raise FTPReplyError, resp
+            end
+          end
+          resp = sendcmd(cmd)
+          # skip 2XX for some ftp servers
+          resp = getresp if resp[0] == ?2
+          if resp[0] != ?1
             raise FTPReplyError, resp
           end
+          conn = BufferedSocket.new(sock.accept)
+          conn.read_timeout = @read_timeout
+          sock.shutdown(Socket::SHUT_WR) rescue nil
+          sock.read rescue nil
+        ensure
+          sock.close
         end
-        resp = sendcmd(cmd)
-        # skip 2XX for some ftp servers
-        resp = getresp if resp[0] == ?2
-        if resp[0] != ?1
-          raise FTPReplyError, resp
-        end
-        conn = BufferedSocket.new(sock.accept)
-        conn.read_timeout = @read_timeout
-        sock.shutdown(Socket::SHUT_WR) rescue nil
-        sock.read rescue nil
-        sock.close
       end
       return conn
     end
     private :transfercmd
 
     #
-    # Logs in to the remote host. The session must have been previously
-    # connected.  If +user+ is the string "anonymous" and the +password+ is
-    # +nil+, a password of <tt>user@host</tt> is synthesized. If the +acct+
-    # parameter is not +nil+, an FTP ACCT command is sent following the
-    # successful login.  Raises an exception on error (typically
-    # <tt>Net::FTPPermError</tt>).
+    # Logs in to the remote host.  The session must have been
+    # previously connected.  If +user+ is the string "anonymous" and
+    # the +password+ is +nil+, "anonymous@" is used as a password.  If
+    # the +acct+ parameter is not +nil+, an FTP ACCT command is sent
+    # following the successful login.  Raises an exception on error
+    # (typically <tt>Net::FTPPermError</tt>).
     #
     def login(user = "anonymous", passwd = nil, acct = nil)
       if user == "anonymous" and passwd == nil
@@ -1102,13 +1105,16 @@ module Net
       end
 
       def gets
-        return readuntil("\n")
-      rescue EOFError
-        return nil
+        line = readuntil("\n", true)
+        return line.empty? ? nil : line
       end
 
       def readline
-        return readuntil("\n")
+        line = gets
+        if line.nil?
+          raise EOFError, "end of file reached"
+        end
+        return line
       end
     end
     # :startdoc:

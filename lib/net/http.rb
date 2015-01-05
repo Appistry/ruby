@@ -876,7 +876,12 @@ module Net   #:nodoc:
 
       D "opening connection to #{conn_address}:#{conn_port}..."
       s = Timeout.timeout(@open_timeout, Net::OpenTimeout) {
-        TCPSocket.open(conn_address, conn_port, @local_host, @local_port)
+        begin
+          TCPSocket.open(conn_address, conn_port, @local_host, @local_port)
+        rescue => e
+          raise e, "Failed to open TCP connection to " +
+            "#{conn_address}:#{conn_port} (#{e.message})"
+        end
       }
       s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
       D "opened"
@@ -914,7 +919,10 @@ module Net   #:nodoc:
             @socket.write(buf)
             HTTPResponse.read_new(@socket).value
           end
-          s.session = @ssl_session if @ssl_session
+          if @ssl_session and
+             Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
+            s.session = @ssl_session if @ssl_session
+          end
           # Server Name Indication (SNI) RFC 3546
           s.hostname = @address if s.respond_to? :hostname=
           Timeout.timeout(@open_timeout, Net::OpenTimeout) { s.connect }
@@ -1026,7 +1034,9 @@ module Net   #:nodoc:
 
     # The proxy URI determined from the environment for this connection.
     def proxy_uri # :nodoc:
-      @proxy_uri ||= URI("http://#{address}:#{port}").find_proxy
+      @proxy_uri ||= URI::HTTP.new(
+        "http".freeze, nil, address, port, nil, nil, nil, nil, nil
+      ).find_proxy
     end
 
     # The address of the proxy server, if one is configured.
@@ -1123,7 +1133,7 @@ module Net   #:nodoc:
     #       end
     #     }
     #
-    def get(path, initheader = {}, dest = nil, &block) # :yield: +body_segment+
+    def get(path, initheader = nil, dest = nil, &block) # :yield: +body_segment+
       res = nil
       request(Get.new(path, initheader)) {|r|
         r.read_body dest, &block
@@ -1345,7 +1355,8 @@ module Net   #:nodoc:
     #    puts response.body
     #
     def send_request(name, path, data = nil, header = nil)
-      r = HTTPGenericRequest.new(name,(data ? true : false),true,path,header)
+      has_response_body = name != 'HEAD'
+      r = HTTPGenericRequest.new(name,(data ? true : false),has_response_body,path,header)
       request r, data
     end
 
@@ -1455,10 +1466,7 @@ module Net   #:nodoc:
         req['connection'] ||= 'close'
       end
 
-      host = req['host'] || address
-      host = $1 if host =~ /(.*):\d+$/
-      req.update_uri host, port, use_ssl?
-
+      req.update_uri address, port, use_ssl?
       req['host'] ||= addr_port()
     end
 

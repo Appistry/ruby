@@ -1,6 +1,6 @@
 require 'test/unit'
 require 'tempfile'
-require_relative 'ruby/envutil'
+require 'thread'
 
 class TestTempfile < Test::Unit::TestCase
   def initialize(*)
@@ -57,6 +57,11 @@ class TestTempfile < Test::Unit::TestCase
     assert_match(/^foo/, File.basename(t.path))
   end
 
+  def test_default_basename
+    t = tempfile
+    assert_file.exist?(t.path)
+  end
+
   def test_basename_with_suffix
     t = tempfile(["foo", ".txt"])
     assert_match(/^foo/, File.basename(t.path))
@@ -68,7 +73,7 @@ class TestTempfile < Test::Unit::TestCase
     path = t.path
 
     t.close
-    assert File.exist?(path)
+    assert_file.exist?(path)
 
     t.unlink
     assert !File.exist?(path)
@@ -128,7 +133,7 @@ class TestTempfile < Test::Unit::TestCase
     File.open(path, "w").close
     begin
       t.close(true)
-      assert File.exist?(path)
+      assert_file.exist?(path)
     ensure
       File.unlink(path) rescue nil
     end
@@ -150,7 +155,7 @@ class TestTempfile < Test::Unit::TestCase
     File.open(path, "w").close
     begin
       t.close!
-      assert File.exist?(path)
+      assert_file.exist?(path)
     ensure
       File.unlink(path) rescue nil
     end
@@ -164,7 +169,7 @@ puts path
 file.close!
 File.open(path, "w").close
     EOS
-      assert File.exist?(filename)
+      assert_file.exist?(filename)
       File.unlink(filename)
       assert_nil error
     end
@@ -178,7 +183,7 @@ File.open(path, "w").close
     EOS
       if !filename.empty?
         # POSIX unlink semantics supported, continue with test
-        assert File.exist?(filename)
+        assert_file.exist?(filename)
         File.unlink(filename)
       end
       assert_nil error
