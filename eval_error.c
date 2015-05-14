@@ -169,7 +169,7 @@ error_print(void)
 		warn_print(")\n");
 	    }
 	    if (tail) {
-		warn_print_str(rb_str_substr(e, tail - einfo, elen - len - 1));
+		warn_print_str(rb_str_subseq(e, tail - einfo, elen - len - 1));
 	    }
 	    if (tail ? einfo[elen-1] != '\n' : !epath) warn_print2("\n", 1);
 	}
@@ -255,7 +255,7 @@ rb_print_inaccessible(VALUE klass, ID id, int scope)
 static int
 sysexit_status(VALUE err)
 {
-    VALUE st = rb_iv_get(err, "status");
+    VALUE st = rb_ivar_get(err, id_status);
     return NUM2INT(st);
 }
 
@@ -303,7 +303,7 @@ error_handle(int ex)
 	    status = sysexit_status(errinfo);
 	}
 	else if (rb_obj_is_instance_of(errinfo, rb_eSignal) &&
-		 rb_iv_get(errinfo, "signo") != INT2FIX(SIGSEGV)) {
+		 rb_ivar_get(errinfo, id_signo) != INT2FIX(SIGSEGV)) {
 	    /* no message when exiting by signal */
 	}
 	else {

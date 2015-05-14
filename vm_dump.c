@@ -36,7 +36,7 @@ control_frame_dump(rb_thread_t *th, rb_control_frame_t *cfp)
     const char *magic, *iseq_name = "-", *selfstr = "-", *biseq_name = "-";
     VALUE tmp;
 
-    if (cfp->block_iseq != 0 && BUILTIN_TYPE(cfp->block_iseq) != T_NODE) {
+    if (cfp->block_iseq != 0 && !RUBY_VM_IFUNC_P(cfp->block_iseq)) {
 	biseq_name = "";	/* RSTRING(cfp->block_iseq->location.label)->ptr; */
     }
 
@@ -711,7 +711,7 @@ rb_print_backtrace(void)
 #endif
 }
 
-#ifdef __FreeBSD__
+#ifdef HAVE_LIBPROCSTAT
 #include <sys/user.h>
 #include <sys/sysctl.h>
 #include <sys/param.h>
@@ -735,7 +735,11 @@ procstat_vm(struct procstat *procstat, struct kinfo_proc *kipp)
 		ptrwidth, "START", ptrwidth, "END", "PRT", "RES",
 		"PRES", "REF", "SHD", "FL", "TP", "PATH");
 
+#ifdef HAVE_PROCSTAT_GETVMMAP
 	freep = procstat_getvmmap(procstat, kipp, &cnt);
+#else
+	freep = kinfo_getvmmap(kipp->ki_pid, &cnt);
+#endif
 	if (freep == NULL)
 		return;
 	for (i = 0; i < cnt; i++) {
@@ -932,6 +936,43 @@ rb_dump_machine_register(const ucontext_t *ctx)
 # define rb_dump_machine_register(ctx) ((void)0)
 #endif /* HAVE_PRINT_MACHINE_REGISTERS */
 
+static void
+preface_dump(void)
+{
+#if defined __APPLE__
+    static const char msg[] = ""
+	"-- Crash Report log information "
+	"--------------------------------------------\n"
+	"   See Crash Report log file under the one of following:\n"
+	"     * ~/Library/Logs/CrashReporter\n"
+	"     * /Library/Logs/CrashReporter\n"
+	"     * ~/Library/Logs/DiagnosticReports\n"
+	"     * /Library/Logs/DiagnosticReports\n"
+	"   for more details.\n"
+	"Don't forget to include the above Crash Report log file in bug reports.\n"
+	"\n";
+    const char *const endmsg = msg + sizeof(msg) - 1;
+    const char *p = msg;
+#define RED "\033[;31;1;7m"
+#define GREEN "\033[;32;7m"
+#define RESET "\033[m"
+
+    if (isatty(fileno(stderr))) {
+	const char *e = strchr(p, '\n');
+	const int w = (int)(e - p);
+	do {
+	    int i = (int)(e - p);
+	    fputs(*p == ' ' ? GREEN : RED, stderr);
+	    fwrite(p, 1, e - p, stderr);
+	    for (; i < w; ++i) fputc(' ', stderr);
+	    fputs(RESET, stderr);
+	    fputc('\n', stderr);
+	} while ((p = e + 1) < endmsg && (e = strchr(p, '\n')) != 0 && e > p + 1);
+    }
+    fwrite(p, 1, endmsg - p, stderr);
+#endif
+}
+
 void
 rb_vm_bugreport(const void *ctx)
 {
@@ -945,18 +986,8 @@ rb_vm_bugreport(const void *ctx)
 #endif
     const rb_vm_t *const vm = GET_VM();
 
-#if defined __APPLE__
-    fputs("-- Crash Report log information "
-	  "--------------------------------------------\n"
-	  "   See Crash Report log file under the one of following:\n"
-	  "     * ~/Library/Logs/CrashReporter\n"
-	  "     * /Library/Logs/CrashReporter\n"
-	  "     * ~/Library/Logs/DiagnosticReports\n"
-	  "     * /Library/Logs/DiagnosticReports\n"
-	  "   for more details.\n"
-	  "\n",
-	  stderr);
-#endif
+    preface_dump();
+
     if (vm) {
 	SDR();
 	rb_backtrace_print_as_bugreport();
@@ -1000,12 +1031,21 @@ rb_vm_bugreport(const void *ctx)
 	    else if (RB_TYPE_P(name, T_CLASS) || RB_TYPE_P(name, T_MODULE)) {
 		const char *const type = RB_TYPE_P(name, T_CLASS) ?
 		    "class" : "module";
-		name = rb_class_name(name);
+		name = rb_search_class_path(rb_class_real(name));
+		if (!RB_TYPE_P(name, T_STRING)) {
+		    fprintf(stderr, " %4d %s:<unnamed>\n", i, type);
+		    continue;
+		}
 		fprintf(stderr, " %4d %s:%.*s\n", i, type,
 			LIMITED_NAME_LENGTH(name), RSTRING_PTR(name));
 	    }
 	    else {
-		VALUE klass = rb_class_name(CLASS_OF(name));
+		VALUE klass = rb_search_class_path(rb_obj_class(name));
+		if (!RB_TYPE_P(klass, T_STRING)) {
+		    fprintf(stderr, " %4d #<%p:%p>\n", i,
+			    (void *)CLASS_OF(name), (void *)name);
+		    continue;
+		}
 		fprintf(stderr, " %4d #<%.*s:%p>\n", i,
 			LIMITED_NAME_LENGTH(klass), RSTRING_PTR(klass),
 			(void *)name);
@@ -1033,7 +1073,7 @@ rb_vm_bugreport(const void *ctx)
 	    }
 	}
 #endif /* __linux__ */
-#ifdef __FreeBSD__
+#ifdef HAVE_LIBPROCSTAT
 # define MIB_KERN_PROC_PID_LEN 4
 	int mib[MIB_KERN_PROC_PID_LEN];
 	struct kinfo_proc kp;

@@ -24,6 +24,10 @@ NORETURN(void rb_raise_jump(VALUE, VALUE));
 VALUE rb_eLocalJumpError;
 VALUE rb_eSysStackError;
 
+ID ruby_static_id_signo, ruby_static_id_status;
+#define id_signo ruby_static_id_signo
+#define id_status ruby_static_id_status
+
 #define exception_error GET_VM()->special_exceptions[ruby_error_reenter]
 
 #include "eval_error.c"
@@ -163,27 +167,27 @@ ruby_cleanup(volatile int ex)
 
     rb_threadptr_interrupt(th);
     rb_threadptr_check_signal(th);
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
 	SAVE_ROOT_JMPBUF(th, { RUBY_VM_CHECK_INTS(th); });
     }
-    POP_TAG();
+    TH_POP_TAG();
 
     errs[1] = th->errinfo;
     th->safe_level = 0;
     ruby_init_stack(&errs[STACK_UPPER(errs, 0, 1)]);
 
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
 	SAVE_ROOT_JMPBUF(th, ruby_finalize_0());
     }
-    POP_TAG();
+    TH_POP_TAG();
 
     /* protect from Thread#raise */
     th->status = THREAD_KILLED;
 
     errs[0] = th->errinfo;
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
 	SAVE_ROOT_JMPBUF(th, rb_thread_terminate_all());
     }
@@ -211,14 +215,14 @@ ruby_cleanup(volatile int ex)
 	if (!RTEST(err)) continue;
 
 	/* th->errinfo contains a NODE while break'ing */
-	if (RB_TYPE_P(err, T_NODE)) continue;
+	if (THROW_DATA_P(err)) continue;
 
 	if (rb_obj_is_kind_of(err, rb_eSystemExit)) {
 	    ex = sysexit_status(err);
 	    break;
 	}
 	else if (rb_obj_is_kind_of(err, rb_eSignal)) {
-	    VALUE sig = rb_iv_get(err, "signo");
+	    VALUE sig = rb_ivar_get(err, id_signo);
 	    state = NUM2INT(sig);
 	    break;
 	}
@@ -231,7 +235,7 @@ ruby_cleanup(volatile int ex)
 
     /* unlock again if finalizer took mutexes. */
     rb_threadptr_unlock_all_locking_mutexes(GET_THREAD());
-    POP_TAG();
+    TH_POP_TAG();
     rb_thread_stop_timer_thread(1);
     ruby_vm_destruct(GET_VM());
     if (state) ruby_default_signal(state);
@@ -248,14 +252,14 @@ ruby_exec_internal(void *n)
 
     if (!n) return 0;
 
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
 	SAVE_ROOT_JMPBUF(th, {
 	    th->base_block = 0;
 	    rb_iseq_eval_main(iseq);
 	});
     }
-    POP_TAG();
+    TH_POP_TAG();
     return state;
 }
 
@@ -337,15 +341,15 @@ static VALUE
 rb_mod_nesting(void)
 {
     VALUE ary = rb_ary_new();
-    const NODE *cref = rb_vm_cref();
+    const rb_cref_t *cref = rb_vm_cref();
 
-    while (cref && cref->nd_next) {
-	VALUE klass = cref->nd_clss;
-	if (!(cref->flags & NODE_FL_CREF_PUSHED_BY_EVAL) &&
+    while (cref && CREF_NEXT(cref)) {
+	VALUE klass = CREF_CLASS(cref);
+	if (!CREF_PUSHED_BY_EVAL(cref) &&
 	    !NIL_P(klass)) {
 	    rb_ary_push(ary, klass);
 	}
-	cref = cref->nd_next;
+	cref = CREF_NEXT(cref);
     }
     return ary;
 }
@@ -375,7 +379,7 @@ rb_mod_nesting(void)
 static VALUE
 rb_mod_s_constants(int argc, VALUE *argv, VALUE mod)
 {
-    const NODE *cref = rb_vm_cref();
+    const rb_cref_t *cref = rb_vm_cref();
     VALUE klass;
     VALUE cbase = 0;
     void *data = 0;
@@ -385,15 +389,15 @@ rb_mod_s_constants(int argc, VALUE *argv, VALUE mod)
     }
 
     while (cref) {
-	klass = cref->nd_clss;
-	if (!(cref->flags & NODE_FL_CREF_PUSHED_BY_EVAL) &&
+	klass = CREF_CLASS(cref);
+	if (!CREF_PUSHED_BY_EVAL(cref) &&
 	    !NIL_P(klass)) {
-	    data = rb_mod_const_at(cref->nd_clss, data);
+	    data = rb_mod_const_at(CREF_CLASS(cref), data);
 	    if (!cbase) {
 		cbase = klass;
 	    }
 	}
-	cref = cref->nd_next;
+	cref = CREF_NEXT(cref);
     }
 
     if (cbase) {
@@ -535,7 +539,7 @@ setup_exception(rb_thread_t *th, int tag, volatile VALUE mesg, VALUE cause)
 	int status;
 
 	mesg = e;
-	PUSH_TAG();
+	TH_PUSH_TAG(th);
 	if ((status = EXEC_TAG()) == 0) {
 	    th->errinfo = Qnil;
 	    e = rb_obj_as_string(mesg);
@@ -553,7 +557,7 @@ setup_exception(rb_thread_t *th, int tag, volatile VALUE mesg, VALUE cause)
 			    rb_obj_class(mesg), e);
 	    }
 	}
-	POP_TAG();
+	TH_POP_TAG();
 	if (status == TAG_FATAL && th->errinfo == exception_error) {
 	    th->errinfo = mesg;
 	}
@@ -903,11 +907,11 @@ rb_ensure(VALUE (*b_proc)(ANYARGS), VALUE data1, VALUE (*e_proc)(ANYARGS), VALUE
     ensure_list.entry.data2 = data2;
     ensure_list.next = th->ensure_list;
     th->ensure_list = &ensure_list;
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
 	result = (*b_proc) (data1);
     }
-    POP_TAG();
+    TH_POP_TAG();
     errinfo = th->errinfo;
     th->ensure_list=ensure_list.next;
     (*ensure_list.entry.e_proc)(ensure_list.entry.data2);
@@ -942,8 +946,8 @@ frame_func_id(rb_control_frame_t *cfp)
     }
     while (iseq) {
 	if (RUBY_VM_IFUNC_P(iseq)) {
-	    NODE *ifunc = (NODE *)iseq;
-	    if (ifunc->nd_aid) return ifunc->nd_aid;
+	    const struct vm_ifunc *ifunc = (struct vm_ifunc *)iseq;
+	    if (ifunc->id) return ifunc->id;
 	    return idIFUNC;
 	}
 	me_local = method_entry_of_iseq(cfp, iseq);
@@ -972,8 +976,8 @@ frame_called_id(rb_control_frame_t *cfp)
     }
     while (iseq) {
 	if (RUBY_VM_IFUNC_P(iseq)) {
-	    NODE *ifunc = (NODE *)iseq;
-	    if (ifunc->nd_aid) return ifunc->nd_aid;
+	    const struct vm_ifunc *ifunc = (struct vm_ifunc *)iseq;
+	    if (ifunc->id) return ifunc->id;
 	    return idIFUNC;
 	}
 	me_local = method_entry_of_iseq(cfp, iseq);
@@ -1150,21 +1154,21 @@ hidden_identity_hash_new(void)
 }
 
 void
-rb_using_refinement(NODE *cref, VALUE klass, VALUE module)
+rb_using_refinement(rb_cref_t *cref, VALUE klass, VALUE module)
 {
     VALUE iclass, c, superclass = klass;
 
     Check_Type(klass, T_CLASS);
     Check_Type(module, T_MODULE);
-    if (NIL_P(cref->nd_refinements)) {
-	RB_OBJ_WRITE(cref, &cref->nd_refinements, hidden_identity_hash_new());
+    if (NIL_P(CREF_REFINEMENTS(cref))) {
+	CREF_REFINEMENTS_SET(cref, hidden_identity_hash_new());
     }
     else {
-	if (cref->flags & NODE_FL_CREF_OMOD_SHARED) {
-	    RB_OBJ_WRITE(cref, &cref->nd_refinements, rb_hash_dup(cref->nd_refinements));
-	    cref->flags &= ~NODE_FL_CREF_OMOD_SHARED;
+	if (CREF_OMOD_SHARED(cref)) {
+	    CREF_REFINEMENTS_SET(cref, rb_hash_dup(CREF_REFINEMENTS(cref)));
+	    CREF_OMOD_SHARED_UNSET(cref);
 	}
-	if (!NIL_P(c = rb_hash_lookup(cref->nd_refinements, klass))) {
+	if (!NIL_P(c = rb_hash_lookup(CREF_REFINEMENTS(cref), klass))) {
 	    superclass = c;
 	    while (c && RB_TYPE_P(c, T_ICLASS)) {
 		if (RBASIC(c)->klass == module) {
@@ -1179,8 +1183,8 @@ rb_using_refinement(NODE *cref, VALUE klass, VALUE module)
     c = iclass = rb_include_class_new(module, superclass);
     RCLASS_REFINED_CLASS(c) = klass;
 
-    RCLASS_M_TBL_WRAPPER(OBJ_WB_UNPROTECT(c)) =
-	RCLASS_M_TBL_WRAPPER(OBJ_WB_UNPROTECT(module));
+    RCLASS_M_TBL(OBJ_WB_UNPROTECT(c)) =
+      RCLASS_M_TBL(OBJ_WB_UNPROTECT(module)); /* TODO: check unprotecting */
 
     module = RCLASS_SUPER(module);
     while (module && module != klass) {
@@ -1189,20 +1193,20 @@ rb_using_refinement(NODE *cref, VALUE klass, VALUE module)
 	RCLASS_REFINED_CLASS(c) = klass;
 	module = RCLASS_SUPER(module);
     }
-    rb_hash_aset(cref->nd_refinements, klass, iclass);
+    rb_hash_aset(CREF_REFINEMENTS(cref), klass, iclass);
 }
 
 static int
 using_refinement(VALUE klass, VALUE module, VALUE arg)
 {
-    NODE *cref = (NODE *) arg;
+    rb_cref_t *cref = (rb_cref_t *) arg;
 
     rb_using_refinement(cref, klass, module);
     return ST_CONTINUE;
 }
 
 static void
-using_module_recursive(NODE *cref, VALUE klass)
+using_module_recursive(const rb_cref_t *cref, VALUE klass)
 {
     ID id_refinements;
     VALUE super, module, refinements;
@@ -1232,7 +1236,7 @@ using_module_recursive(NODE *cref, VALUE klass)
 }
 
 void
-rb_using_module(NODE *cref, VALUE module)
+rb_using_module(const rb_cref_t *cref, VALUE module)
 {
     Check_Type(module, T_MODULE);
     using_module_recursive(cref, module);
@@ -1344,7 +1348,7 @@ rb_mod_refine(VALUE module, VALUE klass)
 static VALUE
 mod_using(VALUE self, VALUE module)
 {
-    NODE *cref = rb_vm_cref();
+    const rb_cref_t *cref = rb_vm_cref();
     rb_control_frame_t *prev_cfp = previous_frame(GET_THREAD());
 
     if (prev_frame_func()) {
@@ -1481,10 +1485,10 @@ top_include(int argc, VALUE *argv, VALUE self)
 static VALUE
 top_using(VALUE self, VALUE module)
 {
-    NODE *cref = rb_vm_cref();
+    const rb_cref_t *cref = rb_vm_cref();
     rb_control_frame_t *prev_cfp = previous_frame(GET_THREAD());
 
-    if (cref->nd_next || (prev_cfp && prev_cfp->me)) {
+    if (CREF_NEXT(cref) || (prev_cfp && prev_cfp->me)) {
 	rb_raise(rb_eRuntimeError,
 		 "main.using is permitted only at toplevel");
     }
@@ -1504,7 +1508,7 @@ errinfo_place(rb_thread_t *th)
 		return &cfp->ep[-2];
 	    }
 	    else if (cfp->iseq->type == ISEQ_TYPE_ENSURE &&
-		     !RB_TYPE_P(cfp->ep[-2], T_NODE) &&
+		     !THROW_DATA_P(cfp->ep[-2]) &&
 		     !FIXNUM_P(cfp->ep[-2])) {
 		return &cfp->ep[-2];
 	    }
@@ -1711,4 +1715,7 @@ Init_eval(void)
     rb_define_global_function("untrace_var", rb_f_untrace_var, -1);	/* in variable.c */
 
     rb_vm_register_special_exception(ruby_error_reenter, rb_eFatal, "exception reentered");
+
+    id_signo = rb_intern_const("signo");
+    id_status = rb_intern_const("status");
 }

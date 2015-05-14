@@ -432,8 +432,8 @@ else
     rb_cv_target_archs=${target_archs}
 fi
 if test "x${ARCH_FLAG}" != x; then
-    CFLAGS="$CFLAGS ${ARCH_FLAG}"
-    LDFLAGS="${LDFLAGS+$LDFLAGS }${ARCH_FLAG}"
+    CFLAGS="${CFLAGS:+$CFLAGS }${ARCH_FLAG}"
+    LDFLAGS="${LDFLAGS:+$LDFLAGS }${ARCH_FLAG}"
 fi
 # RUBY_UNIVERSAL_ARCH end
 ])
@@ -617,8 +617,10 @@ AC_DEFUN([RUBY_DTRACE_AVAILABLE],
 [
     echo "provider conftest{ probe fire(); };" > conftest_provider.d
     if $DTRACE -h -o conftest_provider.h -s conftest_provider.d >/dev/null 2>/dev/null; then
-      # DTrace is available on the system
-      rb_cv_dtrace_available=yes
+      AC_TRY_COMPILE([@%:@include "conftest_provider.h"], [CONFTEST_FIRE();], [
+	# DTrace is available on the system
+	rb_cv_dtrace_available=yes
+      ], [rb_cv_dtrace_available=no])
     else
       # DTrace is not available while dtrace command exists
       # for example FreeBSD 8 or FreeBSD 9 without DTrace build option
@@ -631,6 +633,7 @@ AC_DEFUN([RUBY_DTRACE_AVAILABLE],
 AC_DEFUN([RUBY_DTRACE_POSTPROCESS],
 [AC_CACHE_CHECK(whether $DTRACE needs post processing, rb_cv_prog_dtrace_g,
 [
+  rb_cv_prog_dtrace_g=no
   if {
     cat >conftest_provider.d <<_PROBES &&
     provider conftest {
@@ -638,16 +641,20 @@ AC_DEFUN([RUBY_DTRACE_POSTPROCESS],
     };
 _PROBES
     $DTRACE -h -o conftest_provider.h -s conftest_provider.d >/dev/null 2>/dev/null &&
-    cat >conftest.c <<_CONF &&
-    @%:@include "conftest_provider.h"
-    int main(void){ CONFTEST_FIRE(); return 0; }
-_CONF
-    $CC $CFLAGS $CPPFLAGS -c -o conftest.o conftest.c &&
-    $DTRACE -G -s conftest_provider.d conftest.o 2>/dev/null
+    :
   }; then
-    rb_cv_prog_dtrace_g=yes
-  else
-    rb_cv_prog_dtrace_g=no
+    AC_TRY_COMPILE([@%:@include "conftest_provider.h"], [CONFTEST_FIRE();], [
+	if {
+	    cp -p conftest.${ac_objext} conftest.${ac_objext}.save &&
+	    $DTRACE -G -s conftest_provider.d conftest.${ac_objext} 2>/dev/null &&
+	    :
+	}; then
+	    if cmp -b conftest.o conftest.${ac_objext}.save; then
+		rb_cv_prog_dtrace_g=yes
+	    else
+		rb_cv_prog_dtrace_g=rebuild
+	    fi
+	fi])
   fi
   rm -f conftest.[co] conftest_provider.[dho]
 ])
@@ -790,6 +797,9 @@ if test "$GCC:${warnflags+set}:no" = yes::no; then
 	extra_warning=-Werror=extra-tokens
     else
 	extra_warning=
+    fi
+    if test $gcc_major -eq 5; then
+	extra_warning="$extra_warning -Wno-maybe-uninitialized"
     fi
     for wflag in -Wno-unused-parameter -Wno-parentheses -Wno-long-long \
 		 -Wno-missing-field-initializers \
@@ -1002,6 +1012,13 @@ AS_CASE(["$target_os"],
 		    AC_DEFINE(BROKEN_SETREUID, 1)
 		    AC_DEFINE(BROKEN_SETREGID, 1)
 		fi
+		incs=`$CC -v -E -xc - < /dev/null 2>&1 | sed ['1,/^@%:@include </d;s/^ *//;s|[^./][^/]*/\.\./||g;/\/include$/!d;s||/lib|;/\/usr\/lib/d']`
+		for d in `$CC -print-search-dirs | sed -e '/^libraries: */!d;s///' | tr : '\012' | fgrep -v /../ | sed -n 's|^\(/.*/lib\)/$|\1|p'`; do
+		    incs=`echo "$incs" | fgrep -v "$d"`
+		done
+		for d in $incs; do
+		    test -d "$d" && RUBY_APPEND_OPTIONS(LDFLAGS, "-L$d")
+		done
 		ac_cv_type_getgroups=gid_t # getgroups() on Rosetta fills garbage
 		ac_cv_lib_crypt_crypt=no
 		ac_cv_func_fdatasync=no # Mac OS X wrongly reports it has fdatasync()
@@ -1077,6 +1094,7 @@ main()
 		ac_cv_header_sys_time_h=no
 		ac_cv_header_sys_times_h=no
 		ac_cv_header_sys_socket_h=no
+		ac_cv_func_lstat=yes
 		ac_cv_func_times=yes
 		ac_cv_func_waitpid=yes
 		ac_cv_func_fsync=yes
@@ -1086,6 +1104,7 @@ main()
 		ac_cv_func_isnan=yes
 		ac_cv_func_finite=yes
 		ac_cv_func_link=yes
+		ac_cv_func_readlink=yes
 		ac_cv_lib_crypt_crypt=no
 		ac_cv_func_getpgrp_void=no
 		ac_cv_func_memcmp_working=yes
@@ -1458,7 +1477,16 @@ AC_DEFUN([RUBY_REPLACE_TYPE], [dnl
 	  [
 	    t=INT])
 	rb_cv_[$1]_convertible=${u}${t}])
-    test "${AS_TR_SH(ac_cv_type_[$1])}" = "yes" && n="$1"
+    if test "${AS_TR_SH(ac_cv_type_[$1])}" = "yes"; then
+	n="$1"
+    else
+	AS_CASE(["${rb_cv_[$1]_convertible}"],
+		[*LL], [n="long long"],
+		[*LONG], [n="long"],
+		[n="int"])
+	AS_CASE(["${rb_cv_[$1]_convertible}"],
+		[U*], [n="unsigned $n"])
+    fi
     AS_CASE("${rb_cv_[$1]_convertible}", [U*], [u=+1], [u=-1])
     AC_DEFINE_UNQUOTED(rb_[$1], $n)
     AC_DEFINE_UNQUOTED([SIGNEDNESS_OF_]AS_TR_CPP($1), $u)
@@ -2010,10 +2038,39 @@ else
   AC_LIBOBJ([signbit])
 fi
 
+AC_CACHE_CHECK(for broken memmem, rb_cv_broken_memmem, [
+    AC_TRY_RUN([
+@%:@include <string.h>
+
+int
+main(int argc, char **argv)
+{
+    const char *str = "hogefugafoobar";
+    const char *rs = "foo";
+    const char *empty = "";
+    char *p;
+
+    p = memmem(str, strlen(str), rs, strlen(rs));
+    if (p == str+8) {
+	p = memmem(str, strlen(str), empty, strlen(empty));
+	if (p == str)
+	    return 0;
+    }
+    return 1;
+}
+    ],
+    rb_cv_broken_memmem=no,
+    rb_cv_broken_memmem=yes,
+    rb_cv_broken_memmem=yes)
+])
+test x"$rb_cv_broken_memmem" = xyes && ac_cv_func_memmem=no
+
 AC_FUNC_FORK
 
 AC_CHECK_FUNCS(__syscall)
 AC_CHECK_FUNCS(_longjmp)		# used for AC_ARG_WITH(setjmp-type)
+# we don't use _setjmp if _longjmp doesn't exist.
+test x$ac_cv_func__longjmp = xno && ac_cv_func__setjmp=no
 AC_CHECK_FUNCS(_setjmp)			# used for AC_ARG_WITH(setjmp-type)
 AC_CHECK_FUNCS(_setjmpex)		# used for AC_ARG_WITH(setjmp-type)
 AC_CHECK_FUNCS(atan2l atan2f)
@@ -2034,6 +2091,7 @@ AC_CHECK_FUNCS(fchmod)
 AC_CHECK_FUNCS(fchown)
 AC_CHECK_FUNCS(fcntl)
 AC_CHECK_FUNCS(fdatasync)
+AC_CHECK_FUNCS(fgetattrlist)
 AC_CHECK_FUNCS(fmod)
 AC_CHECK_FUNCS(fsync)
 AC_CHECK_FUNCS(ftruncate)
@@ -2171,8 +2229,16 @@ RUBY_CHECK_BUILTIN_FUNC(__builtin_bswap64, [__builtin_bswap64(0)])
 RUBY_CHECK_BUILTIN_FUNC(__builtin_clz, [__builtin_clz(0)])
 RUBY_CHECK_BUILTIN_FUNC(__builtin_clzl, [__builtin_clzl(0)])
 RUBY_CHECK_BUILTIN_FUNC(__builtin_clzll, [__builtin_clzll(0)])
-RUBY_CHECK_BUILTIN_FUNC(__builtin_choose_expr, [__builtin_choose_expr(0, 0, 0)])
-RUBY_CHECK_BUILTIN_FUNC(__builtin_choose_expr_constant_p, [__builtin_choose_expr(__builtin_constant_p(foo), 0, 0)])
+RUBY_CHECK_BUILTIN_FUNC(__builtin_choose_expr, [
+    [int x[__extension__(__builtin_choose_expr(1, 1, -1))]];
+    [int y[__extension__(__builtin_choose_expr(0, -1, 1))]];
+    ])
+if test x$rb_cv_builtin___builtin_choose_expr = xyes; then
+    RUBY_CHECK_BUILTIN_FUNC(__builtin_choose_expr_constant_p, [
+    [int x[__extension__(__builtin_choose_expr(__builtin_constant_p(1), 1, -1))]];
+    [int y[__extension__(__builtin_choose_expr(__builtin_constant_p(foo), -1, 1))]];
+    ])
+fi
 RUBY_CHECK_BUILTIN_FUNC(__builtin_types_compatible_p, [__builtin_types_compatible_p(int, int)])
 
 if test "$ac_cv_func_qsort_r" != no; then
@@ -2283,9 +2349,6 @@ AC_CACHE_CHECK(for __builtin_setjmp, ac_cv_func___builtin_setjmp,
     done])
 ])
 
-# we don't use _setjmp if _longjmp doesn't exist.
-test x$ac_cv_func__longjmp = xno && ac_cv_func__setjmp=no
-
 AC_DEFUN([RUBY_SETJMP_TYPE], [
 RUBY_CHECK_BUILTIN_SETJMP
 AC_MSG_CHECKING(for setjmp type)
@@ -2306,7 +2369,7 @@ if test ${setjmp_prefix+set}; then
     if test "${setjmp_prefix}" && eval test '$ac_cv_func_'${setjmp_prefix}setjmp${setjmp_suffix} = no; then
 	AC_MSG_ERROR(${setjmp_prefix}setjmp${setjmp_suffix} is not available)
     fi
-elif { AS_CASE("$ac_cv_func___builtin_setjmp", [yes*], [true], [false]); }; then
+elif { AS_CASE("$ac_cv_func___builtin_setjmp", [yes*], [true], [false]) }; then
     setjmp_cast=`expr "$ac_cv_func___builtin_setjmp" : "yes with cast (\(.*\))"`
     setjmp_prefix=__builtin_
     setjmp_suffix=
@@ -2903,6 +2966,10 @@ if test "$with_dln_a_out" != yes; then
 			fi
 			if test "$ac_cv_sizeof_voidp" = 8; then
 			    : ${LIBPATHENV=LD_LIBRARY_PATH_64}
+			    : ${PRELOADENV=LD_PRELOAD_64}
+			else
+			    : ${LIBPATHENV=LD_LIBRARY_PATH_32}
+			    : ${PRELOADENV=LD_PRELOAD_32}
 			fi
 			rb_cv_dlopen=yes],
 	[sunos*], [	: ${LDSHARED='$(LD) -assert nodefinitions'}
@@ -2947,14 +3014,7 @@ if test "$with_dln_a_out" != yes; then
 	[darwin*], [	: ${LDSHARED='$(CC) -dynamic -bundle'}
 			: ${LDFLAGS=""}
 			: ${LIBPATHENV=DYLD_LIBRARY_PATH}
-			# /usr/local/include is always searched for
-			# some reason, but /usr/local/lib is not.
-			hdr=`find /usr/local/include -name \*.h -type f | sed 's:^/usr/local/include/::;q'`
-			if test -n "$hdr" && $CC -E -include "$hdr" -xc - </dev/null 2>/dev/null | fgrep -q "$hdr"; then
-			    $CC -print-search-dirs | grep -q '^libraries:.*:/usr/local/lib/*' ||
-			    echo " $LDFLAGS " | grep -q ' -L */usr/local/lib/* ' ||
-			    LDFLAGS="${LDFLAGS:+$LDFLAGS }-L/usr/local/lib"
-			fi
+			: ${PRELOADENV=DYLD_INSERT_LIBRARIES}
 			rb_cv_dlopen=yes],
         [aix*], [	: ${LDSHARED='$(CC)'}
 			LDSHARED="$LDSHARED ${linker_flag}-G"
@@ -3018,7 +3078,7 @@ if test "$with_dln_a_out" != yes; then
 	  "-undefined dynamic_lookup" \
 	  "-multiply_defined suppress" \
 	  ; do
-	  test "x${linker_flag}" = x || flag="${linker_flag}${flag// /,}"
+	  test "x${linker_flag}" = x || flag="${linker_flag}`echo ${flag} | tr ' ' ,`"
 	  RUBY_TRY_LDFLAGS([$flag], [], [flag=])
 	  if test "x$flag" != x; then
 	    RUBY_APPEND_OPTIONS(DLDFLAGS, [$flag])
@@ -3063,6 +3123,7 @@ AC_SUBST(LINK_SO)
 AC_SUBST(LIBPATHFLAG)
 AC_SUBST(RPATHFLAG)
 AC_SUBST(LIBPATHENV, "${LIBPATHENV-LD_LIBRARY_PATH}")
+AC_SUBST(PRELOADENV, "${PRELOADENV-LD_PRELOAD}")
 AC_SUBST(TRY_LINK)
 
 if test "x$OPT_DIR" != x; then
@@ -3072,17 +3133,22 @@ if test "x$OPT_DIR" != x; then
         for dir in $OPT_DIR; do
             echo x ${LIBPATHFLAG} ${RPATHFLAG} |
             sed "s/^x *//;s${IFS}"'%1\\$-s'"${IFS}${dir}/lib${IFS}g;s${IFS}%s${IFS}${dir}/lib${IFS}g"
-        done | tr '\012' ' '`
-    test x"${LDFLAGS}" = x || LDFLAGS="$LDFLAGS "
-    LDFLAGS="$LDFLAGS$val"
-    test x"${DLDFLAGS}" = x || DLDFLAGS="$DLDFLAGS "
-    DLDFLAGS="$DLDFLAGS$val"
+        done | tr '\012' ' ' | sed 's/ *$//'`
+    if test x"$val" != x; then
+	test x"${LDFLAGS}" = x || LDFLAGS="$LDFLAGS "
+	LDFLAGS="$LDFLAGS$val"
+	test x"${DLDFLAGS}" = x || DLDFLAGS="$DLDFLAGS "
+	DLDFLAGS="$DLDFLAGS$val"
+    fi
     LDFLAGS_OPTDIR="$val"
 fi
 
 AS_CASE(["$target_os"],
 [freebsd*], [
     AC_CHECK_LIB([procstat], [procstat_open_sysctl])
+    if test "x$ac_cv_lib_procstat_procstat_open_sysctl" = xyes; then
+	AC_CHECK_FUNCS(procstat_getvmmap)
+    fi
     ])
 AS_CASE(["$target_cpu-$target_os"],
 [*-darwin*], [
@@ -3241,12 +3307,7 @@ AC_ARG_WITH(ext,
                            [pass to --with-ext option of extmk.rb]))
 AC_ARG_WITH(out-ext,
             AC_HELP_STRING([--with-out-ext=EXTS],
-                           [pass to --without-ext option of extmk.rb]),
-	    [], [
-	    AS_CASE($target_os,
-		[mswin*|mingw*],
-		[as_fn_append ac_configure_args ' --with-out-ext=pty,readline,syslog'],
-		[as_fn_append ac_configure_args ' --with-out-ext=*win32*'])])
+                           [pass to --without-ext option of extmk.rb]))
 EXTSTATIC=
 AC_SUBST(EXTSTATIC)dnl
 AC_ARG_WITH(static-linked-ext,
@@ -3325,6 +3386,7 @@ if test x"$cross_compiling" = xyes; then
   RUNRUBY_COMMAND='$(MINIRUBY) -I`cd $(srcdir)/lib; pwd`'
   RUNRUBY='$(RUNRUBY_COMMAND)'
   XRUBY='$(MINIRUBY)'
+  BOOTSTRAPRUBY='$(BASERUBY)'
   TEST_RUNNABLE=no
   CROSS_COMPILING=yes
 
@@ -3348,6 +3410,7 @@ else
   RUNRUBY_COMMAND='$(MINIRUBY) $(srcdir)/tool/runruby.rb --extout=$(EXTOUT) $(RUNRUBYOPT)'
   RUNRUBY='$(RUNRUBY_COMMAND) --'
   XRUBY='$(RUNRUBY)'
+  BOOTSTRAPRUBY='$(MINIRUBY)'
   TEST_RUNNABLE=yes
   CROSS_COMPILING=no
 fi
@@ -3359,6 +3422,7 @@ AC_SUBST(PREP)
 AC_SUBST(RUNRUBY_COMMAND)
 AC_SUBST(RUNRUBY)
 AC_SUBST(XRUBY)
+AC_SUBST(BOOTSTRAPRUBY)
 AC_SUBST(EXTOUT, [${EXTOUT=.ext}])
 
 FIRSTMAKEFILE=""
@@ -3504,9 +3568,10 @@ AS_CASE("$enable_shared", [yes], [
 	fi
 	LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-install_name '${libprefix}'/$(LIBRUBY_SO)'
 	LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-current_version $(MAJOR).$(MINOR).$(TEENY)'
-	LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-compatibility_version $(ruby_version)'
+	LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-compatibility_version $(RUBY_PROGRAM_VERSION)'
 	if test "$visibility_option" = ld; then
 	    LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-Wl,-unexported_symbol,_Init_*'
+	    LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-Wl,-unexported_symbol,_ruby_static_id_*'
 	    LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "'-Wl,-unexported_symbol,*_threadptr_*'
 	fi
 	LIBRUBY_DLDFLAGS="$LIBRUBY_DLDFLAGS "' $(XLDFLAGS)'
@@ -3596,6 +3661,7 @@ if test "${enable_dtrace}" = "auto"; then
 fi
 
 LIBRUBY_A_OBJS='$(OBJS)'
+DTRACE_REBUILD=
 if test "${enable_dtrace}" = "yes"; then
     if test -z "$DTRACE"; then
         AC_MSG_ERROR([dtrace(1) is missing])
@@ -3608,9 +3674,11 @@ if test "${enable_dtrace}" = "yes"; then
             AC_MSG_ERROR([--enable-dtrace, however, USDT is not available])
         fi
         RUBY_DTRACE_POSTPROCESS()
-        if test "$rb_cv_prog_dtrace_g" = 'yes'; then
+        if test "$rb_cv_prog_dtrace_g" != 'no'; then
             DTRACE_OBJ='probes.$(OBJEXT)'
-            DTRACE_GLOMMED_OBJ='ruby-glommed.$(OBJEXT)'
+        fi
+        if test "$rb_cv_prog_dtrace_g" = 'rebuild'; then
+            DTRACE_REBUILD=yes
             LIBRUBY_A_OBJS='$(DTRACE_GLOMMED_OBJ)'
         fi
         AS_CASE("${target_os}", [freebsd*], [
@@ -3624,7 +3692,7 @@ else
 fi
 AC_SUBST(DTRACE_EXT)
 AC_SUBST(DTRACE_OBJ)
-AC_SUBST(DTRACE_GLOMMED_OBJ)
+AC_SUBST(DTRACE_REBUILD)
 AC_SUBST(LIBRUBY_A_OBJS)
 
 RUBY_SETJMP_TYPE
@@ -3862,40 +3930,6 @@ if test "${universal_binary-no}" = yes ; then
 		[rb_cv_architecture_available=yes], [rb_cv_architecture_available=no]))
 fi
 
-if test "$ac_cv_func_memmem" = yes; then
-  AC_CACHE_CHECK(for broken memmem, rb_cv_broken_memmem, [
-    AC_TRY_RUN([
-#include <string.h>
-
-int
-main()
-{
-  char *str = "hogefugafoobar";
-  char *rs = "foo";
-  char *empty = "";
-  char *p;
-
-  p = memmem(str, strlen(str), rs, strlen(rs));
-  if (p == str+8) {
-    p = memmem(str, strlen(str), empty, strlen(empty));
-    if (p == str)
-      return 0;
-    else
-      return 1;
-  }
-  else {
-    return 1;
-  }
-}
-    ],
-    rb_cv_broken_memmem=no,
-    rb_cv_broken_memmem=yes,
-    rb_cv_broken_memmem=yes)
-  ])
-  test x"$rb_cv_broken_memmem" = xyes && ac_cv_func_memmem=no
-fi
-
-
 CPPFLAGS="$CPPFLAGS "'$(DEFS)'
 test -z "$CPPFLAGS" || CPPFLAGS="$CPPFLAGS "; CPPFLAGS="$CPPFLAGS"'${cppflags}'
 if test -n "${cflags+set}"; then
@@ -4073,6 +4107,7 @@ AC_SUBST(vendordir)dnl
 AC_SUBST(vendorlibdir)dnl
 AC_SUBST(vendorarchdir)dnl
 
+AC_SUBST(CONFIGURE, "`echo $0 | sed 's|.*/||'`")dnl
 AC_SUBST(configure_args, "`echo "${ac_configure_args}" | sed 's/\\$/$$/g'`")dnl
 
 if test "${universal_binary-no}" = yes ; then
@@ -4196,7 +4231,7 @@ BUILTIN_ENCS=["`sed -n -e '/^BUILTIN_ENCS[ 	]*=/{' \
 	-e s/// -e :l -e '/\\\\$/N' -e 's/\\\\\\n/ /' -e 't l' -e p \
 	-e '}' "${srcdir}/enc/Makefile.in"`"]
 BUILTIN_ENCOBJS=
-for e in $BUILTIN_ENCS; do BUILTIN_ENCOBJS="$BUILTIN_ENCOBJS `basename $e .c`"'.$(OBJEXT)'; done
+for e in $BUILTIN_ENCS; do BUILTIN_ENCOBJS="$BUILTIN_ENCOBJS "`echo $e | sed 's/\.c$/.$(OBJEXT)/'`; done
 AC_SUBST(BUILTIN_ENCOBJS)
 
 BUILTIN_TRANSES=["`sed -n -e '/^BUILTIN_TRANSES[ 	]*=/{' \
@@ -4205,8 +4240,8 @@ BUILTIN_TRANSES=["`sed -n -e '/^BUILTIN_TRANSES[ 	]*=/{' \
 BUILTIN_TRANSSRCS=
 BUILTIN_TRANSOBJS=
 for e in $BUILTIN_TRANSES; do
-  BUILTIN_TRANSSRCS="$BUILTIN_TRANSSRCS `basename $e .trans`"'.c';
-  BUILTIN_TRANSOBJS="$BUILTIN_TRANSOBJS `basename $e .trans`"'.$(OBJEXT)';
+  BUILTIN_TRANSSRCS="$BUILTIN_TRANSSRCS "`echo $e | sed 's/\.trans$/.c/'`
+  BUILTIN_TRANSOBJS="$BUILTIN_TRANSOBJS "`echo $e | sed 's/\.trans$/.$(OBJEXT)/'`
 done
 AC_SUBST(BUILTIN_TRANSSRCS)
 AC_SUBST(BUILTIN_TRANSOBJS)

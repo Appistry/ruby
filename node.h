@@ -192,8 +192,6 @@ enum node_type {
 #define NODE_COLON2      NODE_COLON2
     NODE_COLON3,
 #define NODE_COLON3      NODE_COLON3
-    NODE_CREF,
-#define NODE_CREF        NODE_CREF
     NODE_DOT2,
 #define NODE_DOT2        NODE_DOT2
     NODE_DOT3,
@@ -220,10 +218,6 @@ enum node_type {
 #define NODE_ALLOCA      NODE_ALLOCA
     NODE_BMETHOD,
 #define NODE_BMETHOD     NODE_BMETHOD
-    NODE_MEMO,
-#define NODE_MEMO        NODE_MEMO
-    NODE_IFUNC,
-#define NODE_IFUNC       NODE_IFUNC
     NODE_DSYM,
 #define NODE_DSYM        NODE_DSYM
     NODE_ATTRASGN,
@@ -272,9 +266,7 @@ typedef struct RNode {
  *          15: NODE_FL_CREF_PUSHED_BY_EVAL
  *          16: NODE_FL_CREF_OMOD_SHARED
  */
-#define NODE_FL_NEWLINE             (((VALUE)1)<<7)
-#define NODE_FL_CREF_PUSHED_BY_EVAL (((VALUE)1)<<15)
-#define NODE_FL_CREF_OMOD_SHARED    (((VALUE)1)<<16)
+#define NODE_FL_NEWLINE              (((VALUE)1)<<7)
 
 #define NODE_TYPESHIFT 8
 #define NODE_TYPEMASK  (((VALUE)0x7f)<<NODE_TYPESHIFT)
@@ -289,7 +281,7 @@ typedef struct RNode {
 #define nd_set_line(n,l) \
     RNODE(n)->flags=((RNODE(n)->flags&~((VALUE)(-1)<<NODE_LSHIFT))|((VALUE)((l)&NODE_LMASK)<<NODE_LSHIFT))
 
-#define nd_refinements  nd_reserved
+#define nd_refinements_  nd_reserved
 
 #define nd_head  u1.node
 #define nd_alen  u2.argc
@@ -347,7 +339,7 @@ typedef struct RNode {
 #define nd_super u3.node
 
 #define nd_modl  u1.id
-#define nd_clss  u1.value
+#define nd_clss_  u1.value
 
 #define nd_beg   u1.node
 #define nd_end   u2.node
@@ -359,13 +351,12 @@ typedef struct RNode {
 #define nd_tag   u1.id
 #define nd_tval  u2.value
 
-#define nd_visi  u2.argc
+#define nd_visi_  u2.argc
 
 #define NEW_NODE(t,a0,a1,a2) rb_node_newnode((t),(VALUE)(a0),(VALUE)(a1),(VALUE)(a2))
 
 #define NEW_DEFN(i,a,d,p) NEW_NODE(NODE_DEFN,0,i,NEW_SCOPE(a,d))
 #define NEW_DEFS(r,i,a,d) NEW_NODE(NODE_DEFS,r,i,NEW_SCOPE(a,d))
-#define NEW_IFUNC(f,c) NEW_NODE(NODE_IFUNC,f,c,0)
 #define NEW_SCOPE(a,b) NEW_NODE(NODE_SCOPE,local_tbl(),b,a)
 #define NEW_BLOCK(a) NEW_NODE(NODE_BLOCK,a,0,0)
 #define NEW_IF(c,t,e) NEW_NODE(NODE_IF,c,t,e)
@@ -449,7 +440,6 @@ typedef struct RNode {
 #define NEW_MODULE(n,b) NEW_NODE(NODE_MODULE,n,NEW_SCOPE(0,b),0)
 #define NEW_COLON2(c,i) NEW_NODE(NODE_COLON2,c,i,0)
 #define NEW_COLON3(i) NEW_NODE(NODE_COLON3,0,i,0)
-#define NEW_CREF(a) NEW_NODE(NODE_CREF,a,0,0)
 #define NEW_DOT2(b,e) NEW_NODE(NODE_DOT2,b,e,0)
 #define NEW_DOT3(b,e) NEW_NODE(NODE_DOT3,b,e,0)
 #define NEW_SELF() NEW_NODE(NODE_SELF,0,0,0)
@@ -463,12 +453,6 @@ typedef struct RNode {
 #define NEW_BMETHOD(b) NEW_NODE(NODE_BMETHOD,0,0,b)
 #define NEW_ATTRASGN(r,m,a) NEW_NODE(NODE_ATTRASGN,r,m,a)
 #define NEW_PRELUDE(p,b) NEW_NODE(NODE_PRELUDE,p,b,0)
-#define NEW_MEMO(a,b,c) NEW_NODE(NODE_MEMO,a,b,c)
-
-#define roomof(x, y) ((sizeof(x) + sizeof(y) - 1) / sizeof(y))
-#define MEMO_FOR(type, value) ((type *)RARRAY_PTR(value))
-#define NEW_MEMO_FOR(type, value) \
-  ((value) = rb_ary_tmp_new_fill(roomof(type, VALUE)), MEMO_FOR(type, value))
 
 RUBY_SYMBOL_EXPORT_BEGIN
 
@@ -497,15 +481,6 @@ void rb_gc_free_node(VALUE obj);
 size_t rb_node_memsize(VALUE obj);
 VALUE rb_gc_mark_node(NODE *obj);
 
-struct rb_global_entry {
-    struct rb_global_variable *var;
-    ID id;
-};
-
-struct rb_global_entry *rb_global_entry(ID);
-VALUE rb_gvar_get(struct rb_global_entry *);
-VALUE rb_gvar_set(struct rb_global_entry *, VALUE);
-VALUE rb_gvar_defined(struct rb_global_entry *);
 const struct kwtable *rb_reserved_word(const char *, unsigned int);
 
 struct rb_args_info {

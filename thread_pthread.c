@@ -653,6 +653,48 @@ space_size(size_t stack_size)
     }
 }
 
+#ifdef __linux__
+static __attribute__((noinline)) void
+reserve_stack(volatile char *limit, size_t size)
+{
+# ifdef C_ALLOCA
+#   error needs alloca()
+# endif
+    struct rlimit rl;
+    volatile char buf[0x100];
+    enum {stack_check_margin = 0x1000}; /* for -fstack-check */
+
+    STACK_GROW_DIR_DETECTION;
+
+    if (!getrlimit(RLIMIT_STACK, &rl) && rl.rlim_cur == RLIM_INFINITY)
+	return;
+
+    if (size < stack_check_margin) return;
+    size -= stack_check_margin;
+
+    size -= sizeof(buf); /* margin */
+    if (IS_STACK_DIR_UPPER()) {
+	const volatile char *end = buf + sizeof(buf);
+	limit += size;
+	if (limit > end) {
+	    size = limit - end;
+	    limit = alloca(size);
+	    limit[stack_check_margin+size-1] = 0;
+	}
+    }
+    else {
+	limit -= size;
+	if (buf > limit) {
+	    limit = alloca(buf - limit);
+	    limit -= stack_check_margin;
+	    limit[0] = 0;
+	}
+    }
+}
+#else
+# define reserve_stack(limit, size) ((void)(limit), (void)(size))
+#endif
+
 #undef ruby_init_stack
 /* Set stack bottom of Ruby implementation.
  *
@@ -674,6 +716,7 @@ ruby_init_stack(volatile VALUE *addr
 	if (get_main_stack(&stackaddr, &size) == 0) {
 	    native_main_thread.stack_maxsize = size;
 	    native_main_thread.stack_start = stackaddr;
+	    reserve_stack(stackaddr, size);
 	    return;
 	}
     }
@@ -1229,7 +1272,7 @@ static int check_signal_thread_list(void) { return 0; }
 static struct {
     int normal[2];
     int low[2];
-    int owner_process;
+    rb_pid_t owner_process;
 } timer_thread_pipe = {
     {-1, -1},
     {-1, -1}, /* low priority */
@@ -1447,36 +1490,35 @@ timer_thread_sleep(rb_global_vm_lock_t* unused)
 # define SET_THREAD_NAME(name) (void)0
 #endif
 
-static VALUE rb_thread_inspect_msg(VALUE thread, int show_enclosure, int show_location, int show_status);
-
 static void
 native_set_thread_name(rb_thread_t *th)
 {
 #if defined(__linux__) && defined(PR_SET_NAME)
-    VALUE str;
-    char *name, *p;
-    char buf[16];
-    size_t len;
+    if (!th->first_func && th->first_proc) {
+	VALUE loc = rb_proc_location(th->first_proc);
+	if (!NIL_P(loc)) {
+	    const VALUE *ptr = RARRAY_CONST_PTR(loc); /* [ String, Fixnum ] */
+	    char *name, *p;
+	    char buf[16];
+	    size_t len;
+	    int n;
 
-    str = rb_thread_inspect_msg(th->self, 0, 1, 0);
-    name = StringValueCStr(str);
-    if (*name == '@')
-        name++;
-    p = strrchr(name, '/'); /* show only the basename of the path. */
-    if (p && p[1])
-        name = p + 1;
+	    name = RSTRING_PTR(ptr[0]);
+	    p = strrchr(name, '/'); /* show only the basename of the path. */
+	    if (p && p[1])
+		name = p + 1;
 
-    len = strlen(name);
-    if (len < sizeof(buf)) {
-        memcpy(buf, name, len);
-        buf[len] = '\0';
+	    n = snprintf(buf, sizeof(buf), "%s:%d", name, NUM2INT(ptr[1]));
+	    rb_gc_force_recycle(loc); /* acts as a GC guard, too */
+
+	    len = (size_t)n;
+	    if (len >= sizeof(buf)) {
+		buf[sizeof(buf)-2] = '*';
+		buf[sizeof(buf)-1] = '\0';
+	    }
+	    SET_THREAD_NAME(buf);
+	}
     }
-    else {
-        memcpy(buf, name, sizeof(buf)-2);
-        buf[sizeof(buf)-2] = '*';
-        buf[sizeof(buf)-1] = '\0';
-    }
-    SET_THREAD_NAME(buf);
 #endif
 }
 

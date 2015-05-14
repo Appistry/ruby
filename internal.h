@@ -311,14 +311,9 @@ struct rb_classext_struct {
      */
     rb_subclass_entry_t **module_subclasses;
     rb_serial_t class_serial;
-    VALUE origin;
+    const VALUE origin_;
     VALUE refined_class;
     rb_alloc_func_t allocator;
-};
-
-struct method_table_wrapper {
-    st_table *tbl;
-    size_t serial;
 };
 
 #ifndef BDIGIT
@@ -480,21 +475,25 @@ void rb_class_remove_from_super_subclasses(VALUE);
 #define RCLASS_EXT(c) (RCLASS(c)->ptr)
 #define RCLASS_IV_TBL(c) (RCLASS_EXT(c)->iv_tbl)
 #define RCLASS_CONST_TBL(c) (RCLASS_EXT(c)->const_tbl)
-#define RCLASS_M_TBL_WRAPPER(c) (RCLASS(c)->m_tbl_wrapper)
-#define RCLASS_M_TBL(c) (RCLASS_M_TBL_WRAPPER(c) ? RCLASS_M_TBL_WRAPPER(c)->tbl : 0)
+#define RCLASS_M_TBL(c) (RCLASS(c)->m_tbl)
 #define RCLASS_IV_INDEX_TBL(c) (RCLASS_EXT(c)->iv_index_tbl)
-#define RCLASS_ORIGIN(c) (RCLASS_EXT(c)->origin)
+#define RCLASS_ORIGIN(c) (RCLASS_EXT(c)->origin_)
 #define RCLASS_REFINED_CLASS(c) (RCLASS_EXT(c)->refined_class)
 #define RCLASS_SERIAL(c) (RCLASS_EXT(c)->class_serial)
+
+#define RICLASS_IS_ORIGIN FL_USER5
+
+static inline void
+RCLASS_SET_ORIGIN(VALUE klass, VALUE origin)
+{
+    RB_OBJ_WRITE(klass, &RCLASS_ORIGIN(klass), origin);
+    if (klass != origin) FL_SET(origin, RICLASS_IS_ORIGIN);
+}
 
 static inline void
 RCLASS_M_TBL_INIT(VALUE c)
 {
-    struct method_table_wrapper *wrapper;
-    wrapper = ALLOC(struct method_table_wrapper);
-    wrapper->tbl = st_init_numtable();
-    wrapper->serial = 0;
-    RCLASS_M_TBL_WRAPPER(c) = wrapper;
+    RCLASS_M_TBL(c) = st_init_numtable();
 }
 
 #undef RCLASS_SUPER
@@ -514,6 +513,118 @@ RCLASS_SET_SUPER(VALUE klass, VALUE super)
     RB_OBJ_WRITE(klass, &RCLASS(klass)->super, super);
     return super;
 }
+/* IMEMO: Internal memo object */
+
+#ifndef IMEMO_DEBUG
+#define IMEMO_DEBUG 0
+#endif
+
+struct RIMemo {
+    VALUE flags;
+    VALUE v0;
+    VALUE v1;
+    VALUE v2;
+    VALUE v3;
+};
+
+enum imemo_type {
+    imemo_none = 0,
+    imemo_cref = 1,
+    imemo_svar = 2,
+    imemo_throw_data = 3,
+    imemo_ifunc = 4,
+    imemo_memo = 5,
+    imemo_mask = 0x07
+};
+
+static inline enum imemo_type
+imemo_type(VALUE imemo)
+{
+    return (RBASIC(imemo)->flags >> FL_USHIFT) & imemo_mask;
+}
+
+/* CREF */
+
+typedef struct rb_cref_struct {
+    VALUE flags;
+    const VALUE refinements;
+    const VALUE klass;
+    VALUE visi;
+    struct rb_cref_struct * const next;
+} rb_cref_t;
+
+/* SVAR */
+
+struct vm_svar {
+    VALUE flags;
+    const rb_cref_t * const cref;
+    const VALUE lastline;
+    const VALUE backref;
+    const VALUE others;
+};
+
+/* THROW_DATA */
+
+struct vm_throw_data {
+    VALUE flags;
+    VALUE reserved;
+    const VALUE throw_obj;
+    const struct rb_control_frame_struct *catch_frame;
+    VALUE throw_state;
+};
+
+#define THROW_DATA_P(err) RB_TYPE_P((err), T_IMEMO)
+
+/* IFUNC */
+
+struct vm_ifunc {
+    VALUE flags;
+    VALUE reserved;
+    VALUE (*func)(ANYARGS);
+    const void *data;
+    ID id;
+};
+
+#define IFUNC_NEW(a, b, c) ((struct vm_ifunc *)rb_imemo_new(imemo_ifunc, (VALUE)(a), (VALUE)(b), (VALUE)(c), 0))
+
+/* MEMO */
+
+struct MEMO {
+    VALUE flags;
+    VALUE reserved;
+    const VALUE v1;
+    const VALUE v2;
+    union {
+	long cnt;
+	long state;
+	const VALUE value;
+	VALUE (*func)(ANYARGS);
+    } u3;
+};
+
+#define MEMO_V1_SET(m, v) RB_OBJ_WRITE((memo), &(memo)->v1, (v))
+#define MEMO_V2_SET(m, v) RB_OBJ_WRITE((memo), &(memo)->v2, (v))
+
+#define MEMO_CAST(m) ((struct MEMO *)m)
+
+#define MEMO_NEW(a, b, c) ((struct MEMO *)rb_imemo_new(imemo_memo, (VALUE)(a), (VALUE)(b), (VALUE)(c), 0))
+
+#define type_roomof(x, y) ((sizeof(x) + sizeof(y) - 1) / sizeof(y))
+#define MEMO_FOR(type, value) ((type *)RARRAY_PTR(value))
+#define NEW_MEMO_FOR(type, value) \
+  ((value) = rb_ary_tmp_new_fill(type_roomof(type, VALUE)), MEMO_FOR(type, value))
+
+/* global variable */
+
+struct rb_global_entry {
+    struct rb_global_variable *var;
+    ID id;
+};
+
+struct rb_global_entry *rb_global_entry(ID);
+VALUE rb_gvar_get(struct rb_global_entry *);
+VALUE rb_gvar_set(struct rb_global_entry *, VALUE);
+VALUE rb_gvar_defined(struct rb_global_entry *);
 
 struct vtm; /* defined by timev.h */
 
@@ -542,7 +653,7 @@ VALUE rb_integer_float_cmp(VALUE x, VALUE y);
 VALUE rb_integer_float_eq(VALUE x, VALUE y);
 
 /* class.c */
-void rb_class_foreach_subclass(VALUE klass, void(*f)(VALUE));
+void rb_class_foreach_subclass(VALUE klass, void (*f)(VALUE, VALUE), VALUE);
 void rb_class_detach_subclasses(VALUE);
 void rb_class_detach_module_subclasses(VALUE);
 void rb_class_remove_from_module_subclasses(VALUE);
@@ -627,6 +738,9 @@ VALUE rb_check_backtrace(VALUE);
 NORETURN(void rb_async_bug_errno(const char *,int));
 const char *rb_builtin_type_name(int t);
 const char *rb_builtin_class_name(VALUE x);
+PRINTF_ARGS(void rb_enc_warn(rb_encoding *enc, const char *fmt, ...), 2, 3);
+PRINTF_ARGS(void rb_enc_warning(rb_encoding *enc, const char *fmt, ...), 2, 3);
+PRINTF_ARGS(void rb_sys_enc_warning(rb_encoding *enc, const char *fmt, ...), 2, 3);
 
 /* eval.c */
 VALUE rb_refinement_module_get_refined_class(VALUE module);
@@ -701,6 +815,9 @@ struct st_table *rb_hash_tbl_raw(VALUE hash);
 VALUE rb_hash_has_key(VALUE hash, VALUE key);
 VALUE rb_hash_set_default_proc(VALUE hash, VALUE proc);
 long rb_objid_hash(st_index_t index);
+VALUE rb_ident_hash_new(void);
+st_table *rb_init_identtable(void);
+st_table *rb_init_identtable_with_size(st_index_t size);
 
 #define RHASH_TBL_RAW(h) rb_hash_tbl_raw(h)
 VALUE rb_hash_keys(VALUE hash);
@@ -727,7 +844,7 @@ VALUE rb_iseq_absolute_path(VALUE iseqval);
 VALUE rb_iseq_label(VALUE iseqval);
 VALUE rb_iseq_base_label(VALUE iseqval);
 VALUE rb_iseq_first_lineno(VALUE iseqval);
-VALUE rb_iseq_klass(VALUE iseqval); /* completely temporary fucntion */
+VALUE rb_iseq_klass(VALUE iseqval); /* completely temporary function */
 VALUE rb_iseq_method_name(VALUE self);
 
 /* load.c */
@@ -767,6 +884,7 @@ double ruby_float_mod(double x, double y);
 int rb_num_negative_p(VALUE);
 VALUE rb_int_succ(VALUE num);
 VALUE rb_int_pred(VALUE num);
+VALUE rb_dbl_hash(double d);
 
 #if USE_FLONUM
 #define RUBY_BIT_ROTL(v, n) (((v) << (n)) | ((v) >> ((sizeof(v) * 8) - n)))
@@ -952,9 +1070,6 @@ extern int ruby_enable_coredump;
 int rb_get_next_signal(void);
 int rb_sigaltstack_size(void);
 
-/* st.c */
-extern const struct st_hash_type st_hashtype_num;
-
 /* strftime.c */
 #ifdef RUBY_ENCODING_H
 size_t rb_strftime_timespec(char *s, size_t maxsize, const char *format, rb_encoding *enc,
@@ -1026,6 +1141,7 @@ extern rb_encoding OnigEncodingUTF_8;
 
 /* variable.c */
 size_t rb_generic_ivar_memsize(VALUE);
+VALUE rb_search_class_path(VALUE);
 
 /* version.c */
 extern VALUE ruby_engine_name;
@@ -1135,7 +1251,8 @@ VALUE rb_execarg_new(int argc, const VALUE *argv, int accept_shell);
 struct rb_execarg *rb_execarg_get(VALUE execarg_obj); /* dangerous.  needs GC guard. */
 VALUE rb_execarg_init(int argc, const VALUE *argv, int accept_shell, VALUE execarg_obj);
 int rb_execarg_addopt(VALUE execarg_obj, VALUE key, VALUE val);
-void rb_execarg_fixup(VALUE execarg_obj);
+void rb_execarg_parent_start(VALUE execarg_obj);
+void rb_execarg_parent_end(VALUE execarg_obj);
 int rb_execarg_run_options(const struct rb_execarg *e, struct rb_execarg *s, char* errmsg, size_t errmsg_buflen);
 VALUE rb_execarg_extract_options(VALUE execarg_obj, VALUE opthash);
 void rb_execarg_setenv(VALUE execarg_obj, VALUE env);
@@ -1154,6 +1271,7 @@ VALUE rb_setup_fake_str(struct RString *fake_str, const char *name, long len, rb
 
 /* util.c (export) */
 extern const signed char ruby_digit36_to_number_table[];
+extern const char ruby_hexdigits[];
 
 /* variable.c (export) */
 void rb_gc_mark_global_tbl(void);
@@ -1166,9 +1284,18 @@ st_table *rb_st_copy(VALUE obj, struct st_table *orig_tbl);
 
 /* gc.c (export) */
 size_t rb_obj_memsize_of(VALUE);
+void rb_gc_verify_internal_consistency(void);
+
 #define RB_OBJ_GC_FLAGS_MAX 5
 size_t rb_obj_gc_flags(VALUE, ID[], size_t);
 void rb_gc_mark_values(long n, const VALUE *values);
+
+#if IMEMO_DEBUG
+VALUE rb_imemo_new_debug(enum imemo_type type, VALUE v1, VALUE v2, VALUE v3, VALUE v0, const char *file, int line);
+#define rb_imemo_new(type, v1, v2, v3, v0) rb_imemo_new_debug(type, v1, v2, v3, v0, __FILE__, __LINE__)
+#else
+VALUE rb_imemo_new(enum imemo_type type, VALUE v1, VALUE v2, VALUE v3, VALUE v0);
+#endif
 
 RUBY_SYMBOL_EXPORT_END
 

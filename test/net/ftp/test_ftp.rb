@@ -711,7 +711,7 @@ class FTPTest < Test::Unit::TestCase
       sock.print("230 Login successful.\r\n")
       commands.push(sock.gets)
       sock.print("200 Switching to Binary mode.\r\n")
-      commands.push(sock.recv(1024))
+      commands.push(sock.gets)
       sock.print("225 No transfer to ABOR.\r\n")
     }
     begin
@@ -724,7 +724,7 @@ class FTPTest < Test::Unit::TestCase
         assert_match(/\APASS /, commands.shift)
         assert_equal("TYPE I\r\n", commands.shift)
         ftp.abort
-        assert_equal("ABOR\r", commands.shift)
+        assert_equal("ABOR\r\n", commands.shift)
         assert_equal(nil, commands.shift)
       ensure
         ftp.close if ftp
@@ -744,7 +744,7 @@ class FTPTest < Test::Unit::TestCase
       sock.print("230 Login successful.\r\n")
       commands.push(sock.gets)
       sock.print("200 Switching to Binary mode.\r\n")
-      commands.push(sock.recv(1024))
+      commands.push(sock.gets)
       sock.print("211 End of status\r\n")
     }
     begin
@@ -757,8 +757,86 @@ class FTPTest < Test::Unit::TestCase
         assert_match(/\APASS /, commands.shift)
         assert_equal("TYPE I\r\n", commands.shift)
         ftp.status
-        assert_equal("STAT\r", commands.shift)
+        assert_equal("STAT\r\n", commands.shift)
         assert_equal(nil, commands.shift)
+      ensure
+        ftp.close if ftp
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_pathnames
+    require 'pathname'
+
+    commands = []
+    server = create_ftp_server(0.2) { |sock|
+      sock.print("220 (test_ftp).\r\n")
+      commands.push(sock.gets)
+      sock.print("331 Please specify the password.\r\n")
+      commands.push(sock.gets)
+      sock.print("230 Login successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("200 Switching to Binary mode.\r\n")
+      commands.push(sock.gets)
+      sock.print("257 'foo' directory created.\r\n")
+      commands.push(sock.gets)
+      sock.print("250 CWD command successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("250 CWD command successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("250 RMD command successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("213 test.txt  Fri, 11 Jan 2013 11:20:41 -0500.\r\n")
+      commands.push(sock.gets)
+      sock.print("213 test.txt  16.\r\n")
+      commands.push(sock.gets)
+      sock.print("350 File exists, ready for destination name\r\n")
+      commands.push(sock.gets)
+      sock.print("250 RNTO command successful.\r\n")
+      commands.push(sock.gets)
+      sock.print("250 DELE command successful.\r\n")
+    }
+
+    begin
+      begin
+        dir   = Pathname.new("foo")
+        file  = Pathname.new("test.txt")
+        file2 = Pathname.new("test2.txt")
+        ftp   = Net::FTP.new
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        ftp.mkdir(dir)
+        ftp.chdir(dir)
+        ftp.chdir("..")
+        ftp.rmdir(dir)
+        ftp.mdtm(file)
+        ftp.size(file)
+        ftp.rename(file, file2)
+        ftp.delete(file)
+
+        # TODO: These commented tests below expose the error but don't test anything:
+        #   TypeError: no implicit conversion of Pathname into String
+        # ftp.nlst(dir)
+        # ftp.putbinaryfile(Pathname.new("/etc/hosts"), file2)
+        # ftp.puttextfile(Pathname.new("/etc/hosts"), file2)
+        # ftp.gettextfile(Pathname.new("/etc/hosts"), file2)
+        # ftp.getbinaryfile(Pathname.new("/etc/hosts"), file2)
+        # ftp.list(dir, dir, dir)
+
+        assert_match(/\AUSER /, commands.shift)
+        assert_match(/\APASS /, commands.shift)
+        assert_match(/\ATYPE /, commands.shift)
+        assert_match(/\AMKD /, commands.shift)
+        assert_match(/\ACWD /, commands.shift)
+        assert_match(/\ACDUP/, commands.shift)
+        assert_match(/\ARMD /, commands.shift)
+        assert_match(/\AMDTM /, commands.shift)
+        assert_match(/\ASIZE /, commands.shift)
+        assert_match(/\ARNFR /, commands.shift)
+        assert_match(/\ARNTO /, commands.shift)
+        assert_match(/\ADELE /, commands.shift)
       ensure
         ftp.close if ftp
       end
@@ -778,6 +856,7 @@ class FTPTest < Test::Unit::TestCase
       end
       sock = server.accept
       begin
+        sock.setsockopt(Socket::SOL_SOCKET, Socket::SO_OOBINLINE, 1)
         yield(sock)
         sock.shutdown(Socket::SHUT_WR)
         sock.read unless sock.eof?

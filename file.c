@@ -95,7 +95,7 @@ int flock(int, int);
 #ifdef _WIN32
 #define STAT(p, s)	rb_w32_ustati64((p), (s))
 #undef lstat
-#define lstat(p, s)	rb_w32_ustati64((p), (s))
+#define lstat(p, s)	rb_w32_ulstati64((p), (s))
 #undef access
 #define access(p, m)	rb_w32_uaccess((p), (m))
 #undef chmod
@@ -892,7 +892,8 @@ rb_stat_ctime(VALUE self)
  *     stat.birthtime  ->  aTime
  *
  *  Returns the birth time for <i>stat</i>.
- *  If the platform doesn't have birthtime, returns <i>ctime</i>.
+ *
+ *  If the platform doesn't have birthtime, raises NotImplementedError.
  *
  *     File.write("testfile", "foo")
  *     sleep 10
@@ -1051,6 +1052,25 @@ w32_io_info(VALUE *file, BY_HANDLE_FILE_INFORMATION *st)
     }
     if (ret) CloseHandle(ret);
     return INVALID_HANDLE_VALUE;
+}
+
+static VALUE
+close_handle(VALUE h)
+{
+    CloseHandle((HANDLE)h);
+    return Qfalse;
+}
+
+struct w32_io_info_args {
+    VALUE *fname;
+    BY_HANDLE_FILE_INFORMATION *st;
+};
+
+static VALUE
+call_w32_io_info(VALUE arg)
+{
+    struct w32_io_info_args *p = (void *)arg;
+    return (VALUE)w32_io_info(p->fname, p->st);
 }
 #endif
 
@@ -1915,8 +1935,15 @@ rb_file_identical_p(VALUE obj, VALUE fname1, VALUE fname2)
 # ifdef _WIN32
     f1 = w32_io_info(&fname1, &st1);
     if (f1 == INVALID_HANDLE_VALUE) return Qfalse;
-    f2 = w32_io_info(&fname2, &st2);
-    if (f1) CloseHandle(f1);
+    if (f1) {
+	struct w32_io_info_args arg;
+	arg.fname = &fname2;
+	arg.st = &st2;
+	f2 = (HANDLE)rb_ensure(call_w32_io_info, (VALUE)&arg, close_handle, (VALUE)f1);
+    }
+    else {
+	f2 = w32_io_info(&fname2, &st2);
+    }
     if (f2 == INVALID_HANDLE_VALUE) return Qfalse;
     if (f2) CloseHandle(f2);
 
@@ -2193,9 +2220,9 @@ rb_file_ctime(VALUE obj)
  *
  *  _file_name_ can be an IO object.
  *
- *  Note that on Windows (NTFS), returns creation time (birth time).
- *
  *     File.birthtime("testfile")   #=> Wed Apr 09 08:53:13 CDT 2003
+ *
+ *  If the platform doesn't have birthtime, raises NotImplementedError.
  *
  */
 
@@ -2221,9 +2248,9 @@ rb_file_s_birthtime(VALUE klass, VALUE fname)
  *
  *  Returns the birth time for <i>file</i>.
  *
- *  Note that on Windows (NTFS), returns creation time (birth time).
- *
  *     File.new("testfile").birthtime   #=> Wed Apr 09 08:53:14 CDT 2003
+ *
+ *  If the platform doesn't have birthtime, raises NotImplementedError.
  *
  */
 
@@ -2744,7 +2771,7 @@ rb_file_s_symlink(VALUE klass, VALUE from, VALUE to)
 #endif
 
 #ifdef HAVE_READLINK
-static VALUE rb_readlink(VALUE path);
+VALUE rb_readlink(VALUE path);
 
 /*
  *  call-seq:
@@ -2763,7 +2790,8 @@ rb_file_s_readlink(VALUE klass, VALUE path)
     return rb_readlink(path);
 }
 
-static VALUE
+#ifndef _WIN32
+VALUE
 rb_readlink(VALUE path)
 {
     int size = 100;
@@ -2791,6 +2819,7 @@ rb_readlink(VALUE path)
 
     return v;
 }
+#endif
 #else
 #define rb_file_s_readlink rb_f_notimplement
 #endif
@@ -4800,22 +4829,28 @@ rb_f_test(int argc, VALUE *argv)
 
     if (strchr("=<>", cmd)) {
 	struct stat st1, st2;
+        struct timespec t1, t2;
 
 	CHECK(2);
 	if (rb_stat(argv[1], &st1) < 0) return Qfalse;
 	if (rb_stat(argv[2], &st2) < 0) return Qfalse;
 
+        t1 = stat_mtimespec(&st1);
+        t2 = stat_mtimespec(&st2);
+
 	switch (cmd) {
 	  case '=':
-	    if (st1.st_mtime == st2.st_mtime) return Qtrue;
+	    if (t1.tv_sec == t2.tv_sec && t1.tv_nsec == t2.tv_nsec) return Qtrue;
 	    return Qfalse;
 
 	  case '>':
-	    if (st1.st_mtime > st2.st_mtime) return Qtrue;
+	    if (t1.tv_sec > t2.tv_sec) return Qtrue;
+	    if (t1.tv_sec == t2.tv_sec && t1.tv_nsec > t2.tv_nsec) return Qtrue;
 	    return Qfalse;
 
 	  case '<':
-	    if (st1.st_mtime < st2.st_mtime) return Qtrue;
+	    if (t1.tv_sec < t2.tv_sec) return Qtrue;
+	    if (t1.tv_sec == t2.tv_sec && t1.tv_nsec < t2.tv_nsec) return Qtrue;
 	    return Qfalse;
 	}
     }

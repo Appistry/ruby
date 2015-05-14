@@ -1,4 +1,5 @@
 require 'socket.so'
+require 'io/wait'
 
 class Addrinfo
   # creates an Addrinfo object from the arguments.
@@ -50,17 +51,13 @@ class Addrinfo
       sock.ipv6only! if self.ipv6?
       sock.bind local_addrinfo if local_addrinfo
       if timeout
-        begin
-          sock.connect_nonblock(self)
-        rescue IO::WaitWritable
-          if !IO.select(nil, [sock], nil, timeout)
+        case sock.connect_nonblock(self, exception: false)
+        when 0 # success or EISCONN, other errors raise
+          break
+        when :wait_writable
+          sock.wait_writable(timeout) or
             raise Errno::ETIMEDOUT, 'user specified timeout'
-          end
-          begin
-            sock.connect_nonblock(self) # check connection failure
-          rescue Errno::EISCONN
-          end
-        end
+        end while true
       else
         sock.connect(self)
       end

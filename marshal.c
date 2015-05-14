@@ -748,7 +748,7 @@ w_object(VALUE obj, struct dump_arg *arg, int limit)
                 VALUE real_obj = obj;
                 obj = compat->dumper(real_obj);
                 if (!arg->compat_tbl) {
-                    arg->compat_tbl = st_init_numtable();
+                    arg->compat_tbl = rb_init_identtable();
                 }
                 st_insert(arg->compat_tbl, (st_data_t)obj, (st_data_t)real_obj);
 		if (obj != real_obj && !ivtbl) hasiv = 0;
@@ -893,8 +893,8 @@ w_object(VALUE obj, struct dump_arg *arg, int limit)
 
 		if (!rb_obj_respond_to(obj, s_dump_data, TRUE)) {
 		    rb_raise(rb_eTypeError,
-			     "no _dump_data is defined for class %s",
-			     rb_obj_classname(obj));
+			     "no _dump_data is defined for class %"PRIsVALUE,
+			     rb_obj_class(obj));
 		}
 		v = rb_funcall2(obj, s_dump_data, 0, 0);
 		check_dump_arg(arg, s_dump_data);
@@ -904,8 +904,8 @@ w_object(VALUE obj, struct dump_arg *arg, int limit)
 	    break;
 
 	  default:
-	    rb_raise(rb_eTypeError, "can't dump %s",
-		     rb_obj_classname(obj));
+	    rb_raise(rb_eTypeError, "can't dump %"PRIsVALUE,
+		     rb_obj_class(obj));
 	    break;
 	}
 	RB_GC_GUARD(obj);
@@ -997,7 +997,7 @@ marshal_dump(int argc, VALUE *argv)
     wrapper = TypedData_Make_Struct(rb_cData, struct dump_arg, &dump_arg_data, arg);
     arg->dest = 0;
     arg->symbols = st_init_numtable();
-    arg->data    = st_init_numtable();
+    arg->data    = rb_init_identtable();
     arg->infection = 0;
     arg->compat_tbl = 0;
     arg->encodings = 0;
@@ -1295,11 +1295,18 @@ r_bytes0(long len, struct load_arg *arg)
 static int
 sym2encidx(VALUE sym, VALUE val)
 {
-    if (sym == ID2SYM(rb_id_encoding())) {
+    static const char name_encoding[8] = "encoding";
+    const char *p;
+    long l;
+    if (rb_enc_get_index(sym) != ENCINDEX_US_ASCII) return -1;
+    RSTRING_GETMEM(sym, p, l);
+    if (l <= 0) return -1;
+    if (l == sizeof(name_encoding) &&
+	memcmp(p, name_encoding, sizeof(name_encoding)) == 0) {
 	int idx = rb_enc_find_index(StringValueCStr(val));
 	return idx;
     }
-    else if (sym == ID2SYM(rb_intern("E"))) {
+    else if (l == 1 && *p == 'E') {
 	if (val == Qfalse) return rb_usascii_encindex();
 	else if (val == Qtrue) return rb_utf8_encindex();
 	/* bogus ignore */
@@ -1327,7 +1334,8 @@ r_symreal(struct load_arg *arg, int ivar)
     int idx = -1;
     st_index_t n = arg->symbols->num_entries;
 
-    st_insert(arg->symbols, (st_data_t)n, (st_data_t)0);
+    if (rb_enc_str_asciionly_p(s)) rb_enc_associate_index(s, ENCINDEX_US_ASCII);
+    st_insert(arg->symbols, (st_data_t)n, (st_data_t)s);
     if (ivar) {
 	long num = r_long(arg);
 	while (num-- > 0) {
@@ -1336,10 +1344,8 @@ r_symreal(struct load_arg *arg, int ivar)
 	}
     }
     if (idx > 0) rb_enc_associate_index(s, idx);
-    sym = rb_str_intern(s);
-    st_insert(arg->symbols, (st_data_t)n, (st_data_t)sym);
 
-    return sym;
+    return s;
 }
 
 static VALUE
@@ -1367,7 +1373,7 @@ r_symbol(struct load_arg *arg)
 static VALUE
 r_unique(struct load_arg *arg)
 {
-    return rb_sym2str(r_symbol(arg));
+    return r_symbol(arg);
 }
 
 static VALUE
@@ -1465,7 +1471,7 @@ r_ivar(VALUE obj, int *has_encoding, struct load_arg *arg)
 		if (has_encoding) *has_encoding = TRUE;
 	    }
 	    else {
-		rb_ivar_set(obj, SYM2ID(sym), val);
+		rb_ivar_set(obj, rb_intern_str(sym), val);
 	    }
 	} while (--len > 0);
     }
@@ -1507,7 +1513,7 @@ obj_alloc_by_klass(VALUE klass, struct load_arg *arg, VALUE *oldclass)
 	if (oldclass) *oldclass = compat->oldclass;
 
         if (!arg->compat_tbl) {
-            arg->compat_tbl = st_init_numtable();
+            arg->compat_tbl = rb_init_identtable();
         }
         st_insert(arg->compat_tbl, (st_data_t)obj, (st_data_t)real_obj);
         return obj;
@@ -1790,13 +1796,13 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 	    v = r_entry0(v, idx, arg);
 	    values = rb_ary_new2(len);
 	    for (i=0; i<len; i++) {
+		VALUE n = rb_sym2str(RARRAY_AREF(mem, i));
 		slot = r_symbol(arg);
 
-		if (RARRAY_AREF(mem, i) != slot) {
+		if (!rb_str_equal(n, slot)) {
 		    rb_raise(rb_eTypeError, "struct %"PRIsVALUE" not compatible (:%"PRIsVALUE" for :%"PRIsVALUE")",
 			     rb_class_name(klass),
-			     rb_sym2str(slot),
-			     rb_sym2str(RARRAY_AREF(mem, i)));
+			     slot, n);
 		}
                 rb_ary_push(values, r_object(arg));
 		arg->readable -= 2;
@@ -1809,12 +1815,13 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 
       case TYPE_USERDEF:
         {
-	    VALUE klass = path2class(r_unique(arg));
+	    VALUE name = r_unique(arg);
+	    VALUE klass = path2class(name);
 	    VALUE data;
 
 	    if (!rb_obj_respond_to(klass, s_load, TRUE)) {
-		rb_raise(rb_eTypeError, "class %s needs to have method `_load'",
-			 rb_class2name(klass));
+		rb_raise(rb_eTypeError, "class %"PRIsVALUE" needs to have method `_load'",
+			 name);
 	    }
 	    data = r_string(arg);
 	    if (ivp) {
@@ -1830,7 +1837,8 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 
       case TYPE_USRMARSHAL:
         {
-	    VALUE klass = path2class(r_unique(arg));
+	    VALUE name = r_unique(arg);
+	    VALUE klass = path2class(name);
 	    VALUE oldclass = 0;
 	    VALUE data;
 
@@ -1840,8 +1848,8 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 		append_extmod(v, extmod);
             }
 	    if (!rb_obj_respond_to(v, s_mload, TRUE)) {
-		rb_raise(rb_eTypeError, "instance of %s needs to have method `marshal_load'",
-			 rb_class2name(klass));
+		rb_raise(rb_eTypeError, "instance of %"PRIsVALUE" needs to have method `marshal_load'",
+			 name);
 	    }
 	    v = r_entry(v, arg);
 	    data = r_object(arg);
@@ -1872,7 +1880,8 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 
       case TYPE_DATA:
 	{
-	    VALUE klass = path2class(r_unique(arg));
+	    VALUE name = r_unique(arg);
+	    VALUE klass = path2class(name);
 	    VALUE oldclass = 0;
 	    VALUE r;
 
@@ -1883,8 +1892,8 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 	    v = r_entry(v, arg);
 	    if (!rb_obj_respond_to(v, s_load_data, TRUE)) {
 		rb_raise(rb_eTypeError,
-			 "class %s needs to have instance method `_load_data'",
-			 rb_class2name(klass));
+			 "class %"PRIsVALUE" needs to have instance method `_load_data'",
+			 name);
 	    }
 	    r = r_object0(arg, 0, extmod);
 	    rb_funcall2(v, s_load_data, 1, &r);
@@ -1934,11 +1943,12 @@ r_object0(struct load_arg *arg, int *ivp, VALUE extmod)
 	else {
 	    v = r_symreal(arg, 0);
 	}
+	v = rb_str_intern(v);
 	v = r_leave(v, arg);
 	break;
 
       case TYPE_SYMLINK:
-	v = r_symlink(arg);
+	v = rb_str_intern(r_symlink(arg));
 	break;
 
       default:
@@ -2016,7 +2026,7 @@ marshal_load(int argc, VALUE *argv)
     arg->src = port;
     arg->offset = 0;
     arg->symbols = st_init_numtable();
-    arg->data    = st_init_numtable();
+    arg->data    = rb_init_identtable();
     arg->compat_tbl = 0;
     arg->proc = 0;
     arg->readable = 0;

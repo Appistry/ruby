@@ -252,6 +252,17 @@ class TestMarshal < Test::Unit::TestCase
     assert_include(Marshal.dump([:a, :a]), ';')
   end
 
+  def test_symlink_in_ivar
+    bug10991 = '[ruby-core:68587] [Bug #10991]'
+    sym = Marshal.load("\x04\x08" +
+                       "I" ":\x0bKernel" +
+                       ("\x06" +
+                        ("I" ":\x07@a" +
+                         ("\x06" ":\x07@b" "e;\x0""o:\x0bObject""\x0")) +
+                        "0"))
+    assert_equal(:Kernel, sym, bug10991)
+  end
+
   ClassUTF8 = eval("class R\u{e9}sum\u{e9}; self; end")
 
   iso_8859_1 = Encoding::ISO_8859_1
@@ -635,5 +646,53 @@ class TestMarshal < Test::Unit::TestCase
       Marshal.dump(c)
       c.cc.call
     end
+  end
+
+  def test_undumpable_message
+    c = Module.new {break module_eval("class IO\u{26a1} < IO;self;end")}
+    assert_raise_with_message(TypeError, /IO\u{26a1}/) {
+      Marshal.dump(c.new(0, autoclose: false))
+    }
+  end
+
+  def test_undumpable_data
+    c = Module.new {break module_eval("class T\u{23F0 23F3}<Time;undef _dump;self;end")}
+    assert_raise_with_message(TypeError, /T\u{23F0 23F3}/) {
+      Marshal.dump(c.new)
+    }
+  end
+
+  def test_unloadable_data
+    c = eval("class Unloadable\u{23F0 23F3}<Time;;self;end")
+    c.class_eval {
+      alias _dump_data _dump
+      undef _dump
+    }
+    d = Marshal.dump(c.new)
+    assert_raise_with_message(TypeError, /Unloadable\u{23F0 23F3}/) {
+      Marshal.load(d)
+    }
+  end
+
+  def test_unloadable_userdef
+    c = eval("class Userdef\u{23F0 23F3}<Time;self;end")
+    class << c
+      undef _load
+    end
+    d = Marshal.dump(c.new)
+    assert_raise_with_message(TypeError, /Userdef\u{23F0 23F3}/) {
+      Marshal.load(d)
+    }
+  end
+
+  def test_unloadable_usrmarshal
+    c = eval("class UsrMarshal\u{23F0 23F3}<Time;self;end")
+    c.class_eval {
+      alias marshal_dump _dump
+    }
+    d = Marshal.dump(c.new)
+    assert_raise_with_message(TypeError, /UsrMarshal\u{23F0 23F3}/) {
+      Marshal.load(d)
+    }
   end
 end

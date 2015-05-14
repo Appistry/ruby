@@ -159,8 +159,7 @@ getclassvariable
 ()
 (VALUE val)
 {
-    NODE *cref = rb_vm_get_cref(GET_ISEQ(), GET_EP());
-    val = rb_cvar_get(vm_get_cvar_base(cref, GET_CFP()), id);
+    val = rb_cvar_get(vm_get_cvar_base(rb_vm_get_cref(GET_EP()), GET_CFP()), id);
 }
 
 /**
@@ -174,8 +173,7 @@ setclassvariable
 (VALUE val)
 ()
 {
-    NODE *cref = rb_vm_get_cref(GET_ISEQ(), GET_EP());
-    rb_cvar_set(vm_get_cvar_base(cref, GET_CFP()), id, val);
+    rb_cvar_set(vm_get_cvar_base(rb_vm_get_cref(GET_EP()), GET_CFP()), id, val);
 }
 
 /**
@@ -196,7 +194,7 @@ getconstant
 (VALUE klass)
 (VALUE val)
 {
-    val = vm_get_ev_const(th, GET_ISEQ(), klass, id, 0);
+    val = vm_get_ev_const(th, klass, id, 0);
 }
 
 /**
@@ -318,10 +316,10 @@ putspecialobject
 	val = rb_mRubyVMFrozenCore;
 	break;
       case VM_SPECIAL_OBJECT_CBASE:
-	val = vm_get_cbase(GET_ISEQ(), GET_EP());
+	val = vm_get_cbase(GET_EP());
 	break;
       case VM_SPECIAL_OBJECT_CONST_BASE:
-	val = vm_get_const_base(GET_ISEQ(), GET_EP());
+	val = vm_get_const_base(GET_EP());
 	break;
       default:
 	rb_bug("putspecialobject insn: unknown value_type");
@@ -625,6 +623,28 @@ swap
 
 /**
   @c stack
+  @e reverse stack top N order.
+  @j スタックトップの n 個の値を逆転する。
+ */
+DEFINE_INSN
+reverse
+(rb_num_t n)
+(...)
+(...) // inc += 0;
+{
+    rb_num_t i;
+    VALUE *sp = STACK_ADDR_FROM_TOP(n);
+
+    for (i=0; i<n/2; i++) {
+	VALUE v0 = sp[i];
+	VALUE v1 = TOPN(i);
+	sp[i] = v1;
+	TOPN(i) = v0;
+    }
+}
+
+/**
+  @c stack
   @e for stack caching.
   @j スタックキャッシングの状態を調整するために必要な命令。
  */
@@ -667,7 +687,7 @@ setn
 
 /**
   @c stack
-  @e empt current stack
+  @e empty current stack
   @j current stack を空にする。
  */
 DEFINE_INSN
@@ -708,7 +728,7 @@ defined
 	}
 	break;
       case DEFINED_IVAR2:
-	klass = vm_get_cbase(GET_ISEQ(), GET_EP());
+	klass = vm_get_cbase(GET_EP());
 	break;
       case DEFINED_GVAR:
 	if (rb_gvar_defined(rb_global_entry(SYM2ID(obj)))) {
@@ -716,7 +736,7 @@ defined
 	}
 	break;
       case DEFINED_CVAR: {
-	NODE *cref = rb_vm_get_cref(GET_ISEQ(), GET_EP());
+	const rb_cref_t *cref = rb_vm_get_cref(GET_EP());
 	klass = vm_get_cvar_base(cref, GET_CFP());
 	if (rb_cvar_defined(klass, SYM2ID(obj))) {
 	    expr_type = DEFINED_CVAR;
@@ -725,7 +745,7 @@ defined
       }
       case DEFINED_CONST:
 	klass = v;
-	if (vm_get_ev_const(th, GET_ISEQ(), klass, SYM2ID(obj), 1)) {
+	if (vm_get_ev_const(th, klass, SYM2ID(obj), 1)) {
 	    expr_type = DEFINED_CONST;
 	}
 	break;
@@ -991,13 +1011,14 @@ defineclass
 	rb_bug("unknown defineclass type: %d", (int)type);
     }
 
-    COPY_CREF(class_iseq->cref_stack, vm_cref_push(th, klass, NOEX_PUBLIC, NULL));
-
     /* enter scope */
     vm_push_frame(th, class_iseq, VM_FRAME_MAGIC_CLASS,
-		  klass, 0, VM_ENVVAL_BLOCK_PTR(GET_BLOCK_PTR()),
+		  klass, 0,
+		  VM_ENVVAL_BLOCK_PTR(GET_BLOCK_PTR()),
+		  vm_cref_push(th, klass, NOEX_PUBLIC, NULL),
 		  class_iseq->iseq_encoded, GET_SP(),
 		  class_iseq->local_size, 0, class_iseq->stack_max);
+
     RESTORE_REGS();
     NEXT_INSN();
 }
@@ -1219,7 +1240,8 @@ getinlinecache
 ()
 (VALUE val)
 {
-    if (ic->ic_serial == GET_GLOBAL_CONSTANT_STATE()) {
+    if (ic->ic_serial == GET_GLOBAL_CONSTANT_STATE() &&
+	ic->ic_cref == rb_vm_get_cref(GET_EP())) {
 	val = ic->ic_value.value;
 	JUMP(dst);
     }
@@ -1245,6 +1267,7 @@ setinlinecache
     }
     ic->ic_value.value = val;
     ic->ic_serial = GET_GLOBAL_CONSTANT_STATE() - ruby_vm_const_missing_count;
+    ic->ic_cref = rb_vm_get_cref(GET_EP());
     ruby_vm_const_missing_count = 0;
 }
 

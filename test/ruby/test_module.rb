@@ -1087,6 +1087,8 @@ class TestModule < Test::Unit::TestCase
     assert_equal("C\u{df}", c.name, '[ruby-core:24600]')
     c = eval("class C\u{df}; self; end")
     assert_equal("TestModule::C\u{df}", c.name, '[ruby-core:24600]')
+    c = Module.new.module_eval("class X\u{df} < Module; self; end")
+    assert_match(/::X\u{df}:/, c.new.to_s)
   end
 
   def test_method_added
@@ -1725,6 +1727,38 @@ class TestModule < Test::Unit::TestCase
     assert_equal('hello!', foo.new.hello, bug9236)
   end
 
+  def test_prepend_each_classes
+    m = labeled_module("M")
+    c1 = labeled_class("C1") {prepend m}
+    c2 = labeled_class("C2", c1) {prepend m}
+    assert_equal([m, c2, m, c1], c2.ancestors[0, 4], "should be able to prepend each classes")
+  end
+
+  def test_prepend_no_duplication
+    m = labeled_module("M")
+    c = labeled_class("C") {prepend m; prepend m}
+    assert_equal([m, c], c.ancestors[0, 2], "should never duplicate")
+  end
+
+  def test_prepend_in_superclass
+    m = labeled_module("M")
+    c1 = labeled_class("C1")
+    c2 = labeled_class("C2", c1) {prepend m}
+    c1.class_eval {prepend m}
+    assert_equal([m, c2, m, c1], c2.ancestors[0, 4], "should accesisble prepended module in superclass")
+  end
+
+  def test_prepend_call_super
+    assert_separately([], <<-'end;') #do
+      bug10847 = '[ruby-core:68093] [Bug #10847]'
+      module M; end
+      Float.prepend M
+      assert_nothing_raised(SystemStackError, bug10847) do
+        0.3.numerator
+      end
+    end;
+  end
+
   def test_class_variables
     m = Module.new
     m.class_variable_set(:@@foo, 1)
@@ -2009,6 +2043,25 @@ class TestModule < Test::Unit::TestCase
       expect = "#<Method: A(Object)#inspect(shallow_inspect)>"
       assert_equal expect, A.new.method(:inspect).inspect, "#{bug_10282}"
     RUBY
+  end
+
+  def test_define_method_with_unbound_method
+    # Passing an UnboundMethod to define_method succeeds if it is from an ancestor
+    assert_nothing_raised do
+      cls = Class.new(String) do
+        define_method('foo', String.instance_method(:to_s))
+      end
+
+      obj = cls.new('bar')
+      assert_equal('bar', obj.foo)
+    end
+
+    # Passing an UnboundMethod to define_method fails if it is not from an ancestor
+    assert_raise(TypeError) do
+      Class.new do
+        define_method('foo', String.instance_method(:to_s))
+      end
+    end
   end
 
   private

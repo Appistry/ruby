@@ -736,8 +736,8 @@ thread_s_new(int argc, VALUE *argv, VALUE klass)
     rb_obj_call_init(thread, argc, argv);
     GetThreadPtr(thread, th);
     if (!th->first_args) {
-	rb_raise(rb_eThreadError, "uninitialized thread - check `%s#initialize'",
-		 rb_class2name(klass));
+	rb_raise(rb_eThreadError, "uninitialized thread - check `%"PRIsVALUE"#initialize'",
+		 klass);
     }
     return thread;
 }
@@ -796,8 +796,7 @@ rb_thread_create(VALUE (*fn)(ANYARGS), void *arg)
 
 struct join_arg {
     rb_thread_t *target, *waiting;
-    double limit;
-    int forever;
+    double delay;
 };
 
 static VALUE
@@ -826,14 +825,15 @@ thread_join_sleep(VALUE arg)
 {
     struct join_arg *p = (struct join_arg *)arg;
     rb_thread_t *target_th = p->target, *th = p->waiting;
-    double now, limit = p->limit;
+    const int forever = p->delay == DELAY_INFTY;
+    const double limit = forever ? 0 : timeofday() + p->delay;
 
     while (target_th->status != THREAD_KILLED) {
-	if (p->forever) {
+	if (forever) {
 	    sleep_forever(th, 1, 0);
 	}
 	else {
-	    now = timeofday();
+	    double now = timeofday();
 	    if (now > limit) {
 		thread_debug("thread_join: timeout (thid: %"PRI_THREAD_ID")\n",
 			     thread_id_str(target_th));
@@ -862,8 +862,7 @@ thread_join(rb_thread_t *target_th, double delay)
 
     arg.target = target_th;
     arg.waiting = th;
-    arg.limit = timeofday() + delay;
-    arg.forever = delay == DELAY_INFTY;
+    arg.delay = delay;
 
     thread_debug("thread_join (thid: %"PRI_THREAD_ID")\n", thread_id_str(target_th));
 
@@ -885,11 +884,16 @@ thread_join(rb_thread_t *target_th, double delay)
 	VALUE err = target_th->errinfo;
 
 	if (FIXNUM_P(err)) {
-	    /* */
+	    switch (err) {
+	      case INT2FIX(TAG_FATAL):
+		/* OK. killed. */
+		break;
+	      default:
+		rb_bug("thread_join: Fixnum (%d) should not reach here.", FIX2INT(err));
+	    }
 	}
-	else if (RB_TYPE_P(target_th->errinfo, T_NODE)) {
-	    rb_exc_raise(rb_vm_make_jump_tag_but_local_jump(
-		GET_THROWOBJ_STATE(err), GET_THROWOBJ_VAL(err)));
+	else if (THROW_DATA_P(target_th->errinfo)) {
+	    rb_bug("thread_join: THROW_DATA should not reach here.");
 	}
 	else {
 	    /* normal exception */
@@ -959,10 +963,14 @@ thread_join_m(int argc, VALUE *argv, VALUE self)
  *  call-seq:
  *     thr.value   -> obj
  *
- *  Waits for +thr+ to complete, using #join, and returns its value.
+ *  Waits for +thr+ to complete, using #join, and returns its value or raises
+ *  the exception which terminated the thread.
  *
  *     a = Thread.new { 2 + 2 }
  *     a.value   #=> 4
+ *
+ *     b = Thread.new { raise 'something went wrong' }
+ *     b.value   #=> RuntimeError: something went wrong
  */
 
 static VALUE
@@ -1383,9 +1391,9 @@ rb_thread_call_without_gvl(void *(*func)(void *data), void *data1,
 VALUE
 rb_thread_io_blocking_region(rb_blocking_function_t *func, void *data1, int fd)
 {
-    VALUE val = Qundef; /* shouldn't be used */
+    volatile VALUE val = Qundef; /* shouldn't be used */
     rb_thread_t *th = GET_THREAD();
-    int saved_errno = 0;
+    volatile int saved_errno = 0;
     int state;
 
     th->waiting_fd = fd;
@@ -1784,7 +1792,7 @@ rb_thread_s_handle_interrupt(VALUE self, VALUE mask_arg)
 {
     VALUE mask;
     rb_thread_t *th = GET_THREAD();
-    VALUE r = Qnil;
+    volatile VALUE r = Qnil;
     int state;
 
     if (!rb_block_given_p()) {
@@ -2707,40 +2715,6 @@ rb_thread_safe_level(VALUE thread)
     return INT2NUM(th->safe_level);
 }
 
-static VALUE
-rb_thread_inspect_msg(VALUE thread, int show_enclosure, int show_location, int show_status)
-{
-    VALUE cname = rb_class_path(rb_obj_class(thread));
-    rb_thread_t *th;
-    const char *status;
-    VALUE str;
-
-    GetThreadPtr(thread, th);
-    status = thread_status_name(th);
-    if (show_enclosure)
-        str = rb_sprintf("#<%"PRIsVALUE":%p", cname, (void *)thread);
-    else
-        str = rb_str_new(NULL, 0);
-    if (show_location && !th->first_func && th->first_proc) {
-	long i;
-	VALUE v, loc = rb_proc_location(th->first_proc);
-	if (!NIL_P(loc)) {
-	    char sep = '@';
-	    for (i = 0; i < RARRAY_LEN(loc) && !NIL_P(v = RARRAY_AREF(loc, i)); ++i) {
-		rb_str_catf(str, "%c%"PRIsVALUE, sep, v);
-		sep = ':';
-	    }
-	}
-    }
-    if (show_status || show_enclosure)
-        rb_str_catf(str, " %s%s",
-                show_status ? status : "",
-                show_enclosure ? ">" : "");
-    OBJ_INFECT(str, thread);
-
-    return str;
-}
-
 /*
  * call-seq:
  *   thr.inspect   -> string
@@ -2751,7 +2725,26 @@ rb_thread_inspect_msg(VALUE thread, int show_enclosure, int show_location, int s
 static VALUE
 rb_thread_inspect(VALUE thread)
 {
-    return rb_thread_inspect_msg(thread, 1, 1, 1);
+    VALUE cname = rb_class_path(rb_obj_class(thread));
+    rb_thread_t *th;
+    const char *status;
+    VALUE str;
+
+    GetThreadPtr(thread, th);
+    status = thread_status_name(th);
+    str = rb_sprintf("#<%"PRIsVALUE":%p", cname, (void *)thread);
+    if (!th->first_func && th->first_proc) {
+	VALUE loc = rb_proc_location(th->first_proc);
+	if (!NIL_P(loc)) {
+	    const VALUE *ptr = RARRAY_CONST_PTR(loc);
+	    rb_str_catf(str, "@%"PRIsVALUE":%"PRIsVALUE, ptr[0], ptr[1]);
+	    rb_gc_force_recycle(loc);
+	}
+    }
+    rb_str_catf(str, " %s>", status);
+    OBJ_INFECT(str, thread);
+
+    return str;
 }
 
 /* variables for recursive traversals */
@@ -4368,7 +4361,6 @@ rb_mutex_lock(VALUE self)
  *    mutex.owned?  -> true or false
  *
  * Returns +true+ if this lock is currently held by current thread.
- * <em>This API is experimental, and subject to change.</em>
  */
 VALUE
 rb_mutex_owned_p(VALUE self)
@@ -4676,14 +4668,6 @@ rb_thread_shield_destroy(VALUE self)
 }
 
 static VALUE
-ident_hash_new(void)
-{
-    VALUE hash = rb_hash_new();
-    rb_hash_tbl_raw(hash)->type = &st_hashtype_num;
-    return hash;
-}
-
-static VALUE
 threadptr_recursive_hash(rb_thread_t *th)
 {
     return th->local_storage_recursive_hash;
@@ -4710,7 +4694,7 @@ recursive_list_access(VALUE sym)
     VALUE hash = threadptr_recursive_hash(th);
     VALUE list;
     if (NIL_P(hash) || !RB_TYPE_P(hash, T_HASH)) {
-	hash = ident_hash_new();
+	hash = rb_ident_hash_new();
 	threadptr_recursive_hash_set(th, hash);
 	list = Qnil;
     }
@@ -4718,7 +4702,7 @@ recursive_list_access(VALUE sym)
 	list = rb_hash_aref(hash, sym);
     }
     if (NIL_P(list) || !RB_TYPE_P(list, T_HASH)) {
-	list = ident_hash_new();
+	list = rb_ident_hash_new();
 	rb_hash_aset(hash, sym, list);
     }
     return list;
@@ -4879,10 +4863,11 @@ exec_recursive(VALUE (*func) (VALUE, VALUE, int), VALUE obj, VALUE pairid, VALUE
 	    }
 	}
 	else {
+	    volatile VALUE ret = Qundef;
 	    recursive_push(p.list, p.objid, p.pairid);
 	    PUSH_TAG();
 	    if ((state = EXEC_TAG()) == 0) {
-		result = (*func)(obj, arg, FALSE);
+		ret = (*func)(obj, arg, FALSE);
 	    }
 	    POP_TAG();
 	    if (!recursive_pop(p.list, p.objid, p.pairid)) {
@@ -4892,6 +4877,7 @@ exec_recursive(VALUE (*func) (VALUE, VALUE, int), VALUE obj, VALUE pairid, VALUE
 			 sym, rb_thread_current());
 	    }
 	    if (state) JUMP_TAG(state);
+	    result = ret;
 	}
     }
     *(volatile struct exec_recursive_params *)&p;

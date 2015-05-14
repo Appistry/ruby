@@ -193,12 +193,12 @@ class TestStringIO < Test::Unit::TestCase
   def test_close
     f = StringIO.new("")
     f.close
-    assert_raise(IOError) { f.close }
+    assert_nil(f.close)
 
     f = StringIO.new("")
     f.close_read
     f.close_write
-    assert_raise(IOError) { f.close }
+    assert_nil(f.close)
   ensure
     f.close unless f.closed?
   end
@@ -207,7 +207,7 @@ class TestStringIO < Test::Unit::TestCase
     f = StringIO.new("")
     f.close_read
     assert_raise(IOError) { f.read }
-    assert_raise(IOError) { f.close_read }
+    assert_nothing_raised(IOError) {f.close_read}
     f.close
 
     f = StringIO.new("", "w")
@@ -221,7 +221,7 @@ class TestStringIO < Test::Unit::TestCase
     f = StringIO.new("")
     f.close_write
     assert_raise(IOError) { f.write("foo") }
-    assert_raise(IOError) { f.close_write }
+    assert_nothing_raised(IOError) {f.close_write}
     f.close
 
     f = StringIO.new("", "r")

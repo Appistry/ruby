@@ -137,11 +137,23 @@ rb_any_hash(VALUE a)
 
     if (SPECIAL_CONST_P(a)) {
 	if (a == Qundef) return 0;
-	if (STATIC_SYM_P(a)) a >>= (RUBY_SPECIAL_SHIFT + ID_SCOPE_SHIFT);
+	if (STATIC_SYM_P(a)) {
+	    a >>= (RUBY_SPECIAL_SHIFT + ID_SCOPE_SHIFT);
+	}
+	else if (FLONUM_P(a)) {
+	    /* prevent pathological behavior: [Bug #10761] */
+	    return rb_dbl_hash(rb_float_value(a));
+	}
 	hnum = rb_objid_hash((st_index_t)a);
     }
     else if (BUILTIN_TYPE(a) == T_STRING) {
 	hnum = rb_str_hash(a);
+    }
+    else if (BUILTIN_TYPE(a) == T_SYMBOL) {
+	hnum = rb_objid_hash((st_index_t)a);
+    }
+    else if (BUILTIN_TYPE(a) == T_FLOAT) {
+	return rb_dbl_hash(rb_float_value(a));
     }
     else {
         hval = rb_hash(a);
@@ -171,7 +183,39 @@ static const struct st_hash_type objhash = {
     rb_any_hash,
 };
 
-#define identhash st_hashtype_num
+#define rb_ident_cmp st_numcmp
+
+static st_index_t
+rb_ident_hash(st_data_t n)
+{
+    /*
+     * This hash function is lightly-tuned for Ruby.  Further tuning
+     * should be possible.  Notes:
+     *
+     * - (n >> 3) alone is great for heap objects and OK for fixnum,
+     *   however symbols perform poorly.
+     * - (n >> (RUBY_SPECIAL_SHIFT+3)) was added to make symbols hash well,
+     *   n.b.: +3 to remove ID scope, +1 worked well initially, too
+     * - (n << 3) was finally added to avoid losing bits for fixnums
+     * - avoid expensive modulo instructions, it is currently only
+     *   shifts and bitmask operations.
+     * - flonum (on 64-bit) is pathologically bad, mix the actual
+     *   float value in, but do not use the float value as-is since
+     *   many integers get interpreted as 2.0 or -2.0 [Bug #10761]
+     */
+#ifdef USE_FLONUM /* RUBY */
+    if (FLONUM_P(n)) {
+	n ^= (st_data_t)rb_float_value(n);
+    }
+#endif
+
+    return (st_index_t)((n>>(RUBY_SPECIAL_SHIFT+3)|(n<<3)) ^ (n>>3));
+}
+
+static const struct st_hash_type identhash = {
+    rb_ident_cmp,
+    rb_ident_hash,
+};
 
 typedef int st_foreach_func(st_data_t, st_data_t, st_data_t);
 
@@ -1019,8 +1063,8 @@ rb_hash_delete(VALUE hash, VALUE key)
  *     hsh.delete(key) {| key | block }  -> value
  *
  *  Deletes the key-value pair and returns the value from <i>hsh</i> whose
- *  key is equal to <i>key</i>. If the key is not found, returns the
- *  <em>default value</em>. If the optional code block is given and the
+ *  key is equal to <i>key</i>. If the key is not found, it returns
+ *  <em>nil</em>. If the optional code block is given and the
  *  key is not found, pass in the key and return the result of
  *  <i>block</i>.
  *
@@ -1882,6 +1926,10 @@ rb_hash_values(VALUE hash)
  *     h.has_key?("a")   #=> true
  *     h.has_key?("z")   #=> false
  *
+ *  Note that <code>include?</code> and <code>member?</code> do not test member
+ *  equality using <code>==</code> as do other Enumerables.
+ *
+ *  See also Enumerable#include?
  */
 
 VALUE
@@ -2503,6 +2551,26 @@ rb_hash_compare_by_id_p(VALUE hash)
     return Qfalse;
 }
 
+VALUE
+rb_ident_hash_new(void)
+{
+    VALUE hash = rb_hash_new();
+    RHASH(hash)->ntbl = st_init_table(&identhash);
+    return hash;
+}
+
+st_table *
+rb_init_identtable(void)
+{
+    return st_init_table(&identhash);
+}
+
+st_table *
+rb_init_identtable_with_size(st_index_t size)
+{
+    return st_init_table_with_size(&identhash, size);
+}
+
 static int
 any_p_i(VALUE key, VALUE value, VALUE arg)
 {
@@ -2631,9 +2699,24 @@ env_str_new2(const char *ptr)
     return env_str_new(ptr, strlen(ptr));
 }
 
+static void *
+get_env_cstr(VALUE str, const char *name)
+{
+    char *var;
+    rb_encoding *enc = rb_enc_get(str);
+    if (!rb_enc_asciicompat(enc)) {
+	rb_raise(rb_eArgError, "bad environment variable %s: ASCII incompatible encoding: %s",
+		 name, rb_enc_name(enc));
+    }
+    var = RSTRING_PTR(str);
+    if (memchr(var, '\0', RSTRING_LEN(str))) {
+	rb_raise(rb_eArgError, "bad environment variable %s: contains null byte", name);
+    }
+    return var;
+}
+
 #define get_env_ptr(var, val) \
-    (memchr((var = RSTRING_PTR(val)), '\0', RSTRING_LEN(val)) ? \
-     rb_raise(rb_eArgError, "bad environment variable " #var) : (void)0)
+    (var = get_env_cstr(val, #var))
 
 static inline const char *
 env_name(volatile VALUE *s)
@@ -2972,6 +3055,7 @@ ruby_unsetenv(const char *name)
  *
  * Sets the environment variable +name+ to +value+.  If the value given is
  * +nil+ the environment variable is deleted.
+ * +name+ must be a string.
  *
  */
 static VALUE

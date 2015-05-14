@@ -465,7 +465,7 @@ rb_zlib_adler32_combine(VALUE klass, VALUE adler1, VALUE adler2, VALUE len2)
 /*
  * Document-method: Zlib.crc32
  *
- * call-seq: Zlib.crc32(string, adler)
+ * call-seq: Zlib.crc32(string, crc)
  *
  * Calculates CRC checksum for +string+, and returns updated value of +crc+. If
  * +string+ is omitted, it returns the CRC initial value. If +crc+ is omitted, it
@@ -3297,9 +3297,13 @@ rb_gzfile_set_comment(VALUE obj, VALUE str)
 static VALUE
 rb_gzfile_close(VALUE obj)
 {
-    struct gzfile *gz = get_gzfile(obj);
+    struct gzfile *gz;
     VALUE io;
 
+    TypedData_Get_Struct(obj, struct gzfile, &gzfile_data_type, gz);
+    if (!ZSTREAM_IS_READY(&gz->z)) {
+        return Qnil;
+    }
     io = gz->io;
     gzfile_close(gz, 1);
     return io;
@@ -4233,6 +4237,17 @@ rb_gzreader_readlines(int argc, VALUE *argv, VALUE obj)
     return dst;
 }
 
+/*
+ * Document-method: Zlib::GzipReader#external_encoding
+ *
+ * See Zlib::GzipReader documentation for a description.
+ */
+static VALUE
+rb_gzreader_external_encoding(VALUE self)
+{
+    return rb_enc_from_encoding(get_gzfile(self)->enc);
+}
+
 #endif /* GZIP_SUPPORT */
 
 void
@@ -4501,6 +4516,7 @@ Init_zlib(void)
     rb_define_method(cGzipReader, "each_line", rb_gzreader_each, -1);
     rb_define_method(cGzipReader, "lines", rb_gzreader_lines, -1);
     rb_define_method(cGzipReader, "readlines", rb_gzreader_readlines, -1);
+    rb_define_method(cGzipReader, "external_encoding", rb_gzreader_external_encoding, 0);
 
     /* The OS code of current host */
     rb_define_const(mZlib, "OS_CODE", INT2FIX(OS_CODE));

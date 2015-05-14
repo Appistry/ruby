@@ -652,6 +652,15 @@ class TestMethod < Test::Unit::TestCase
       EOC
   end
 
+  def test_unbound_method_proc_coerce
+    # '&' coercion of an UnboundMethod raises TypeError
+    assert_raise(TypeError) do
+      Class.new do
+        define_method('foo', &Object.instance_method(:to_s))
+      end
+    end
+  end
+
   def test___dir__
     assert_instance_of String, __dir__
     assert_equal(File.dirname(File.realpath(__FILE__)), __dir__)
@@ -876,5 +885,19 @@ class TestMethod < Test::Unit::TestCase
     assert_raise_with_message(SecurityError, /#{m}/) do
       obj.bar
     end
+  end
+
+  def test_to_proc_binding
+    bug11012 = '[ruby-core:68673] [Bug #11012]'
+    class << (obj = Object.new)
+      src = 1000.times.map {|i|"v#{i} = nil"}.join("\n")
+      eval("def foo()\n""#{src}\n""end")
+    end
+
+    b = obj.method(:foo).to_proc.binding
+    b.local_variables.each_with_index {|n, i|
+      b.local_variable_set(n, i)
+    }
+    assert_equal([998, 999], %w[v998 v999].map {|n| b.local_variable_get(n)}, bug11012)
   end
 end

@@ -146,21 +146,21 @@ enum vm_regan_acttype {
 /**********************************************************/
 
 #define COPY_CREF_OMOD(c1, c2) do {  \
-  RB_OBJ_WRITE((c1), &(c1)->nd_refinements, (c2)->nd_refinements); \
-  if (!NIL_P((c2)->nd_refinements)) { \
-      (c1)->flags |= NODE_FL_CREF_OMOD_SHARED; \
-      (c2)->flags |= NODE_FL_CREF_OMOD_SHARED; \
+  CREF_REFINEMENTS_SET(c1, CREF_REFINEMENTS(c2)); \
+  if (!NIL_P(CREF_REFINEMENTS(c2))) { \
+      CREF_OMOD_SHARED_SET(c1); \
+      CREF_OMOD_SHARED_SET(c2); \
   } \
 } while (0)
 
 #define COPY_CREF(c1, c2) do {  \
-  NODE *__tmp_c2 = (c2); \
-  COPY_CREF_OMOD(c1, __tmp_c2); \
-  RB_OBJ_WRITE((c1), &(c1)->nd_clss, __tmp_c2->nd_clss); \
-  (c1)->nd_visi = __tmp_c2->nd_visi;\
-  RB_OBJ_WRITE((c1), &(c1)->nd_next, __tmp_c2->nd_next); \
-  if (__tmp_c2->flags & NODE_FL_CREF_PUSHED_BY_EVAL) { \
-      (c1)->flags |= NODE_FL_CREF_PUSHED_BY_EVAL; \
+  rb_cref_t *__tmp_c2 = (c2); \
+  COPY_CREF_OMOD((c1), __tmp_c2); \
+  CREF_CLASS_SET((c1), CREF_CLASS(__tmp_c2));\
+  CREF_VISI_SET((c1), CREF_VISI(__tmp_c2));\
+  CREF_NEXT_SET((c1), CREF_NEXT(__tmp_c2));\
+  if (CREF_PUSHED_BY_EVAL(__tmp_c2)) { \
+      CREF_PUSHED_BY_EVAL_SET(c1); \
   } \
 } while (0)
 
@@ -229,5 +229,40 @@ enum vm_regan_acttype {
 static VALUE make_no_method_exception(VALUE exc, const char *format,
 				      VALUE obj, int argc, const VALUE *argv);
 
+static inline struct vm_throw_data *
+THROW_DATA_NEW(VALUE val, rb_control_frame_t *cf, VALUE st)
+{
+    return (struct vm_throw_data *)rb_imemo_new(imemo_throw_data, val, (VALUE)cf, st, 0);
+}
+
+static inline void
+THROW_DATA_CATCH_FRAME_SET(struct vm_throw_data *obj, const rb_control_frame_t *cfp)
+{
+    obj->catch_frame = cfp;
+}
+
+static inline void
+THROW_DATA_STATE_SET(struct vm_throw_data *obj, int st)
+{
+    obj->throw_state = (VALUE)st;
+}
+
+static inline VALUE
+THROW_DATA_VAL(const struct vm_throw_data *obj)
+{
+    return obj->throw_obj;
+}
+
+static inline const rb_control_frame_t *
+THROW_DATA_CATCH_FRAME(const struct vm_throw_data *obj)
+{
+    return obj->catch_frame;
+}
+
+static int
+THROW_DATA_STATE(const struct vm_throw_data *obj)
+{
+    return (int)obj->throw_state;
+}
 
 #endif /* RUBY_INSNHELPER_H */

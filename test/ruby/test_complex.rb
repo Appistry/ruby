@@ -289,6 +289,13 @@ class Complex_Test < Test::Unit::TestCase
 
     assert_equal(Complex(Rational(2,1),Rational(4)), c * Rational(2))
     assert_equal(Complex(Rational(2,3),Rational(4,3)), c * Rational(2,3))
+
+    c = Complex(Float::INFINITY, 0)
+    assert_equal(Complex(Float::INFINITY, 0), c * Complex(1, 0))
+    assert_equal(Complex(0, Float::INFINITY), c * Complex(0, 1))
+    c = Complex(0, Float::INFINITY)
+    assert_equal(Complex(0, Float::INFINITY), c * Complex(1, 0))
+    assert_equal(Complex(-Float::INFINITY, 0), c * Complex(0, 1))
   end
 
   def test_div
@@ -943,9 +950,9 @@ class Complex_Test < Test::Unit::TestCase
       assert_in_delta(0.804, c.real, 0.001)
       assert_in_delta(1.107, c.imag, 0.001)
 
-      c = CMath.log(Complex(1, 2), Math::E)
-      assert_in_delta(0.804, c.real, 0.001)
-      assert_in_delta(1.107, c.imag, 0.001)
+      c = CMath.log(Complex(1, 2), Math::E**2)
+      assert_in_delta(0.402, c.real, 0.001)
+      assert_in_delta(0.5535, c.imag, 0.001)
 
       c = CMath.log(-1)
       assert_in_delta(0.0, c.real, 0.001)

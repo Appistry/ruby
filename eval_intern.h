@@ -199,20 +199,92 @@ enum ruby_tag_type {
 #define TAG_FATAL	RUBY_TAG_FATAL
 #define TAG_MASK	RUBY_TAG_MASK
 
-#define NEW_THROW_OBJECT(val, pt, st) \
-  ((VALUE)rb_node_newnode(NODE_LIT, (VALUE)(val), (VALUE)(pt), (VALUE)(st)))
-#define SET_THROWOBJ_CATCH_POINT(obj, val) \
-  (RNODE((obj))->u2.value = (val))
-#define SET_THROWOBJ_STATE(obj, val) \
-  (RNODE((obj))->u3.value = (val))
+#define SCOPE_TEST(f)  (CREF_VISI(rb_vm_cref()) & (f))
+#define SCOPE_CHECK(f) (CREF_VISI(rb_vm_cref()) == (f))
+#define SCOPE_SET(f)   (CREF_VISI_SET(rb_vm_cref(), (f)))
 
-#define GET_THROWOBJ_VAL(obj)         ((VALUE)RNODE((obj))->u1.value)
-#define GET_THROWOBJ_CATCH_POINT(obj) ((VALUE*)RNODE((obj))->u2.value)
-#define GET_THROWOBJ_STATE(obj)       ((int)RNODE((obj))->u3.value)
+/* CREF operators */
 
-#define SCOPE_TEST(f)  (rb_vm_cref()->nd_visi & (f))
-#define SCOPE_CHECK(f) (rb_vm_cref()->nd_visi == (f))
-#define SCOPE_SET(f)   (rb_vm_cref()->nd_visi = (f))
+#define NODE_FL_CREF_PUSHED_BY_EVAL_ (((VALUE)1)<<15)
+#define NODE_FL_CREF_OMOD_SHARED_    (((VALUE)1)<<16)
+
+static inline VALUE
+CREF_CLASS(const rb_cref_t *cref)
+{
+    return cref->klass;
+}
+
+static inline void
+CREF_CLASS_SET(rb_cref_t *cref, VALUE klass)
+{
+    RB_OBJ_WRITE(cref, &cref->klass, klass);
+}
+
+static inline rb_cref_t *
+CREF_NEXT(const rb_cref_t *cref)
+{
+    return cref->next;
+}
+
+static inline void
+CREF_NEXT_SET(rb_cref_t *cref, const rb_cref_t *next_cref)
+{
+    RB_OBJ_WRITE(cref, &cref->next, next_cref);
+}
+
+static inline long
+CREF_VISI(const rb_cref_t *cref)
+{
+    return (long)cref->visi;
+}
+
+static inline void
+CREF_VISI_SET(rb_cref_t *cref, long v)
+{
+    cref->visi = v;
+}
+
+static inline VALUE
+CREF_REFINEMENTS(const rb_cref_t *cref)
+{
+    return cref->refinements;
+}
+
+static inline void
+CREF_REFINEMENTS_SET(rb_cref_t *cref, VALUE refs)
+{
+    RB_OBJ_WRITE(cref, &cref->refinements, refs);
+}
+
+static inline int
+CREF_PUSHED_BY_EVAL(const rb_cref_t *cref)
+{
+    return cref->flags & NODE_FL_CREF_PUSHED_BY_EVAL_;
+}
+
+static inline void
+CREF_PUSHED_BY_EVAL_SET(rb_cref_t *cref)
+{
+    cref->flags |= NODE_FL_CREF_PUSHED_BY_EVAL_;
+}
+
+static inline int
+CREF_OMOD_SHARED(const rb_cref_t *cref)
+{
+    return cref->flags & NODE_FL_CREF_OMOD_SHARED_;
+}
+
+static inline void
+CREF_OMOD_SHARED_SET(rb_cref_t *cref)
+{
+    cref->flags |= NODE_FL_CREF_OMOD_SHARED_;
+}
+
+static inline void
+CREF_OMOD_SHARED_UNSET(rb_cref_t *cref)
+{
+    cref->flags &= ~NODE_FL_CREF_OMOD_SHARED_;
+}
 
 void rb_thread_cleanup(void);
 void rb_thread_wait_other_threads(void);
@@ -245,7 +317,7 @@ NORETURN(void rb_raise_method_missing(rb_thread_t *th, int argc, const VALUE *ar
 				      VALUE obj, int call_status));
 
 VALUE rb_vm_make_jump_tag_but_local_jump(int state, VALUE val);
-NODE *rb_vm_cref(void);
+rb_cref_t *rb_vm_cref(void);
 VALUE rb_vm_call_cfunc(VALUE recv, VALUE (*func)(VALUE), VALUE arg, const rb_block_t *blockptr, VALUE filename);
 void rb_vm_set_progname(VALUE filename);
 void rb_thread_terminate_all(void);

@@ -56,7 +56,12 @@
 # define CharNextExA(cp, p, flags) CharNextExA((WORD)(cp), (p), (flags))
 #endif
 
+#if _WIN32_WINNT < 0x0600
+DWORD WINAPI GetFinalPathNameByHandleW(HANDLE, LPWSTR, DWORD, DWORD);
+#endif
+
 static int w32_stati64(const char *path, struct stati64 *st, UINT cp);
+static int w32_lstati64(const char *path, struct stati64 *st, UINT cp);
 static char *w32_getenv(const char *name, UINT cp);
 
 #undef getenv
@@ -84,15 +89,12 @@ static char *w32_getenv(const char *name, UINT cp);
 #undef setsockopt
 #undef dup2
 
-#if defined __BORLANDC__
-#  define _filbuf _fgetc
-#  define _flsbuf _fputc
-#  define enough_to_get(n) (--(n) >= 0)
-#  define enough_to_put(n) (++(n) < 0)
-#else
-#  define enough_to_get(n) (--(n) >= 0)
-#  define enough_to_put(n) (--(n) >= 0)
+#if RUBY_MSVCRT_VERSION >= 140
+# define _filbuf _fgetc_nolock
+# define _flsbuf _fputc_nolock
 #endif
+#define enough_to_get(n) (--(n) >= 0)
+#define enough_to_put(n) (--(n) >= 0)
 
 #ifdef WIN32_DEBUG
 #define Debug(something) something
@@ -107,6 +109,7 @@ static int has_redirection(const char *, UINT);
 int rb_w32_wait_events(HANDLE *events, int num, DWORD timeout);
 static int rb_w32_open_osfhandle(intptr_t osfhandle, int flags);
 static int wstati64(const WCHAR *path, struct stati64 *st);
+static int wlstati64(const WCHAR *path, struct stati64 *st);
 VALUE rb_w32_conv_from_wchar(const WCHAR *wstr, rb_encoding *enc);
 int ruby_brace_glob_with_enc(const char *str, int flags, ruby_glob_func *func, VALUE arg, rb_encoding *enc);
 
@@ -865,7 +868,8 @@ FindFreeChildSlot(void)
    -e 'END{$cmds.sort.each{|n,f|puts "    \"\\#{f.to_s(8)}\" #{n.dump} + 1,"}}'
    98cmd ntcmd
  */
-static const char *const szInternalCmds[] = {
+#define InternalCmdsMax 8
+static const char szInternalCmds[][InternalCmdsMax+2] = {
     "\2" "assoc",
     "\3" "break",
     "\3" "call",
@@ -921,7 +925,7 @@ static const char *const szInternalCmds[] = {
 static int
 internal_match(const void *key, const void *elem)
 {
-    return strcmp(key, (*(const char *const *)elem) + 1);
+    return strncmp(key, ((const char *)elem) + 1, InternalCmdsMax);
 }
 
 /* License: Ruby's */
@@ -972,13 +976,13 @@ is_internal_cmd(const char *cmd, int nt)
 static int
 internal_cmd_match(const char *cmdname, int nt)
 {
-    char **nm;
+    char *nm;
 
     nm = bsearch(cmdname, szInternalCmds,
 		 sizeof(szInternalCmds) / sizeof(*szInternalCmds),
 		 sizeof(*szInternalCmds),
 		 internal_match);
-    if (!nm || !(nm[0][0] & (nt ? 2 : 1)))
+    if (!nm || !(nm[0] & (nt ? 2 : 1)))
 	return 0;
     return 1;
 }
@@ -1869,6 +1873,7 @@ opendir_internal(WCHAR *wpath, const char *filename)
     HANDLE fh;
     DIR *p;
     long len;
+    long altlen;
     long idx;
     WCHAR *tmpW;
     char *tmp;
@@ -1907,12 +1912,13 @@ opendir_internal(WCHAR *wpath, const char *filename)
     //
     do {
 	len = lstrlenW(fd.cFileName) + 1;
+	altlen = lstrlenW(fd.cAlternateFileName) + 1;
 
 	//
 	// bump the string table size by enough for the
 	// new name and it's null terminator
 	//
-	tmpW = realloc(p->start, (idx + len) * sizeof(WCHAR));
+	tmpW = realloc(p->start, (idx + len + altlen) * sizeof(WCHAR));
 	if (!tmpW) {
 	  error:
 	    rb_w32_closedir(p);
@@ -1923,6 +1929,7 @@ opendir_internal(WCHAR *wpath, const char *filename)
 
 	p->start = tmpW;
 	memcpy(&p->start[idx], fd.cFileName, len * sizeof(WCHAR));
+	memcpy(&p->start[idx + len], fd.cAlternateFileName, altlen * sizeof(WCHAR));
 
 	if (p->nfiles % DIRENT_PER_CHAR == 0) {
 	    tmp = realloc(p->bits, p->nfiles / DIRENT_PER_CHAR + 1);
@@ -1937,7 +1944,7 @@ opendir_internal(WCHAR *wpath, const char *filename)
 	    SetBit(p->bits, BitOfIsRep(p->nfiles));
 
 	p->nfiles++;
-	idx += len;
+	idx += len + altlen;
     } while (FindNextFileW(fh, &fd));
     FindClose(fh);
     p->size = idx;
@@ -2022,6 +2029,7 @@ move_to_next_entry(DIR *dirp)
     if (dirp->curr) {
 	dirp->loc++;
 	dirp->curr += lstrlenW(dirp->curr) + 1;
+	dirp->curr += lstrlenW(dirp->curr) + 1;
 	if (dirp->curr >= (dirp->start + dirp->size)) {
 	    dirp->curr = NULL;
 	}
@@ -2034,11 +2042,16 @@ move_to_next_entry(DIR *dirp)
 //
 /* License: Ruby's */
 static BOOL
-win32_direct_conv(const WCHAR *file, struct direct *entry, const void *enc)
+win32_direct_conv(const WCHAR *file, const WCHAR *alt, struct direct *entry, const void *enc)
 {
     UINT cp = *((UINT *)enc);
     if (!(entry->d_name = wstr_to_mbstr(cp, file, -1, &entry->d_namlen)))
 	return FALSE;
+    if (alt && *alt) {
+	long altlen = 0;
+	entry->d_altname = wstr_to_mbstr(cp, alt, -1, &altlen);
+	entry->d_altlen = altlen;
+    }
     return TRUE;
 }
 
@@ -2090,16 +2103,21 @@ rb_w32_conv_from_wstr(const WCHAR *wstr, long *lenp, rb_encoding *enc)
 
 /* License: Ruby's */
 static BOOL
-ruby_direct_conv(const WCHAR *file, struct direct *entry, const void *enc)
+ruby_direct_conv(const WCHAR *file, const WCHAR *alt, struct direct *entry, const void *enc)
 {
     if (!(entry->d_name = rb_w32_conv_from_wstr(file, &entry->d_namlen, enc)))
 	return FALSE;
+    if (alt && *alt) {
+	long altlen = 0;
+	entry->d_altname = rb_w32_conv_from_wstr(alt, &altlen, enc);
+	entry->d_altlen = altlen;
+    }
     return TRUE;
 }
 
 /* License: Artistic or GPL */
 static struct direct *
-readdir_internal(DIR *dirp, BOOL (*conv)(const WCHAR *, struct direct *, const void *), const void *enc)
+readdir_internal(DIR *dirp, BOOL (*conv)(const WCHAR *, const WCHAR *, struct direct *, const void *), const void *enc)
 {
     static int dummy = 0;
 
@@ -2110,7 +2128,11 @@ readdir_internal(DIR *dirp, BOOL (*conv)(const WCHAR *, struct direct *, const v
 	//
 	if (dirp->dirstr.d_name)
 	    free(dirp->dirstr.d_name);
-	conv(dirp->curr, &dirp->dirstr, enc);
+	if (dirp->dirstr.d_altname)
+	    free(dirp->dirstr.d_altname);
+	dirp->dirstr.d_altname = 0;
+	dirp->dirstr.d_altlen = 0;
+	conv(dirp->curr, dirp->curr + lstrlenW(dirp->curr) + 1, &dirp->dirstr, enc);
 
 	//
 	// Fake inode
@@ -2120,8 +2142,13 @@ readdir_internal(DIR *dirp, BOOL (*conv)(const WCHAR *, struct direct *, const v
 	//
 	// Attributes
 	//
-	dirp->dirstr.d_isdir = GetBit(dirp->bits, BitOfIsDir(dirp->loc));
-	dirp->dirstr.d_isrep = GetBit(dirp->bits, BitOfIsRep(dirp->loc));
+	/* ignore FILE_ATTRIBUTE_DIRECTORY as unreliable for reparse points */
+	if (GetBit(dirp->bits, BitOfIsRep(dirp->loc)))
+	    dirp->dirstr.d_type = DT_LNK;
+	else if (GetBit(dirp->bits, BitOfIsDir(dirp->loc)))
+	    dirp->dirstr.d_type = DT_DIR;
+	else
+	    dirp->dirstr.d_type = DT_REG;
 
 	//
 	// Now set up for the next call to readdir
@@ -2201,6 +2228,8 @@ rb_w32_closedir(DIR *dirp)
     if (dirp) {
 	if (dirp->dirstr.d_name)
 	    free(dirp->dirstr.d_name);
+	if (dirp->dirstr.d_altname)
+	    free(dirp->dirstr.d_altname);
 	if (dirp->start)
 	    free(dirp->start);
 	if (dirp->bits)
@@ -2209,18 +2238,30 @@ rb_w32_closedir(DIR *dirp)
     }
 }
 
-#if (defined _MT || defined __MSVCRT__) && !defined __BORLANDC__
-#define MSVCRT_THREADS
-#endif
-#ifdef MSVCRT_THREADS
-# define MTHREAD_ONLY(x) x
-# define STHREAD_ONLY(x)
-#elif defined(__BORLANDC__)
-# define MTHREAD_ONLY(x)
-# define STHREAD_ONLY(x)
+#if RUBY_MSVCRT_VERSION >= 140
+typedef struct {
+    union
+    {
+        FILE  _public_file;
+        char* _ptr;
+    };
+
+    char*            _base;
+    int              _cnt;
+    long             _flags;
+    long             _file;
+    int              _charbuf;
+    int              _bufsiz;
+    char*            _tmpfname;
+    CRITICAL_SECTION _lock;
+} vcruntime_file;
+#define FILE_COUNT(stream) ((vcruntime_file*)stream)->_cnt
+#define FILE_READPTR(stream) ((vcruntime_file*)stream)->_ptr
+#define FILE_FILENO(stream) ((vcruntime_file*)stream)->_file
 #else
-# define MTHREAD_ONLY(x)
-# define STHREAD_ONLY(x) x
+#define FILE_COUNT(stream) stream->_cnt
+#define FILE_READPTR(stream) stream->_ptr
+#define FILE_FILENO(stream) stream->_file
 #endif
 
 /* License: Ruby's */
@@ -2228,10 +2269,8 @@ typedef struct	{
     intptr_t osfhnd;	/* underlying OS file HANDLE */
     char osfile;	/* attributes of file (e.g., open in text mode?) */
     char pipech;	/* one char buffer for handles opened on pipes */
-#ifdef MSVCRT_THREADS
     int lockinitflag;
     CRITICAL_SECTION lock;
-#endif
 #if RUBY_MSVCRT_VERSION >= 80
     char textmode;
     char pipech2[2];
@@ -2243,7 +2282,6 @@ typedef struct	{
 #define _CRTIMP __declspec(dllimport)
 #endif
 
-#if !defined(__BORLANDC__)
 EXTERN_C _CRTIMP ioinfo * __pioinfo[];
 static inline ioinfo* _pioinfo(int);
 
@@ -2252,6 +2290,8 @@ static inline ioinfo* _pioinfo(int);
 #define _osfhnd(i)  (_pioinfo(i)->osfhnd)
 #define _osfile(i)  (_pioinfo(i)->osfile)
 #define _pipech(i)  (_pioinfo(i)->pipech)
+#define rb_acrt_lowio_lock_fh(i)   EnterCriticalSection(&_pioinfo(i)->lock)
+#define rb_acrt_lowio_unlock_fh(i) LeaveCriticalSection(&_pioinfo(i)->lock)
 
 #if RUBY_MSVCRT_VERSION >= 80
 static size_t pioinfo_extra = 0;	/* workaround for VC++8 SP1 */
@@ -2338,14 +2378,14 @@ rb_w32_open_osfhandle(intptr_t osfhandle, int flags)
     }
     else {
 
-	MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fh)->lock)));
+	rb_acrt_lowio_lock_fh(fh);
 	/* the file is open. now, set the info in _osfhnd array */
 	_set_osfhnd(fh, osfhandle);
 
 	fileflags |= FOPEN;		/* mark as open */
 
 	_set_osflags(fh, fileflags); /* set osfile entry */
-	MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fh)->lock));
+	rb_acrt_lowio_unlock_fh(fh);
     }
     return fh;			/* return handle */
 }
@@ -2363,45 +2403,20 @@ init_stdhandle(void)
      (fd))
 
     if (fileno(stdin) < 0) {
-	stdin->_file = open_null(0);
+	FILE_FILENO(stdin) = open_null(0);
     }
     else {
 	setmode(fileno(stdin), O_BINARY);
     }
     if (fileno(stdout) < 0) {
-	stdout->_file = open_null(1);
+	FILE_FILENO(stdout) = open_null(1);
     }
     if (fileno(stderr) < 0) {
-	stderr->_file = open_null(2);
+	FILE_FILENO(stderr) = open_null(2);
     }
     if (nullfd >= 0 && !keep) close(nullfd);
     setvbuf(stderr, NULL, _IONBF, 0);
 }
-#else
-
-#define _set_osfhnd(fh, osfh) (void)((fh), (osfh))
-#define _set_osflags(fh, flags) (void)((fh), (flags))
-
-/* License: Ruby's */
-static void
-init_stdhandle(void)
-{
-}
-#endif
-
-/* License: Ruby's */
-#ifdef __BORLANDC__
-static int
-rb_w32_open_osfhandle(intptr_t osfhandle, int flags)
-{
-    int fd = _open_osfhandle(osfhandle, flags);
-    if (fd == -1) {
-	errno = EMFILE;		/* too many open files */
-	_doserrno = 0L;		/* not an OS error */
-    }
-    return fd;
-}
-#endif
 
 #undef getsockopt
 
@@ -2437,15 +2452,6 @@ rb_w32_strerror(int e)
     static char buffer[512];
     DWORD source = 0;
     char *p;
-
-#if defined __BORLANDC__ && defined ENOTEMPTY // _sys_errlist is broken
-    switch (e) {
-      case ENAMETOOLONG:
-	return "Filename too long";
-      case ENOTEMPTY:
-	return "Directory not empty";
-    }
-#endif
 
     if (e < 0 || e > sys_nerr) {
 	if (e < 0)
@@ -3027,9 +3033,9 @@ rb_w32_accept(int s, struct sockaddr *addr, int *addrlen)
 	    r = accept(TO_SOCKET(s), addr, addrlen);
 	    if (r != INVALID_SOCKET) {
 		SetHandleInformation((HANDLE)r, HANDLE_FLAG_INHERIT, 0);
-		MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fd)->lock)));
+		rb_acrt_lowio_lock_fh(fd);
 		_set_osfhnd(fd, r);
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		CloseHandle(h);
 		socklist_insert(r, 0);
 	    }
@@ -4081,7 +4087,7 @@ dupfd(HANDLE hDup, char flags, int minfd)
     save_errno = errno;
     while (filled > 0) {
 	int fd = fds[--filled];
-	_osfhnd(fd) = (intptr_t)INVALID_HANDLE_VALUE;
+	_set_osfhnd(fd, (intptr_t)INVALID_HANDLE_VALUE);
 	close(fd);
     }
     errno = save_errno;
@@ -4647,6 +4653,137 @@ link(const char *from, const char *to)
 }
 
 /* License: Ruby's */
+ssize_t
+rb_w32_wreadlink(const WCHAR *path, WCHAR *buf, size_t bufsize)
+{
+    struct {
+	ULONG  ReparseTag;
+	USHORT ReparseDataLength;
+	USHORT Reserved;
+	union {
+	    struct {
+		USHORT SubstituteNameOffset;
+		USHORT SubstituteNameLength;
+		USHORT PrintNameOffset;
+		USHORT PrintNameLength;
+		ULONG  Flags;
+		WCHAR  PathBuffer[MAXPATHLEN * 2];
+	    } SymbolicLinkReparseBuffer;
+	    struct {
+		USHORT SubstituteNameOffset;
+		USHORT SubstituteNameLength;
+		USHORT PrintNameOffset;
+		USHORT PrintNameLength;
+		WCHAR  PathBuffer[MAXPATHLEN * 2];
+	    } MountPointReparseBuffer;
+	};
+    } rp;
+    HANDLE f;
+    DWORD ret;
+    int e = 0;
+
+    typedef BOOL (WINAPI *device_io_control_func)(HANDLE, DWORD, LPVOID,
+						  DWORD, LPVOID, DWORD,
+						  LPDWORD, LPOVERLAPPED);
+    static device_io_control_func device_io_control = (device_io_control_func)-1;
+
+    if (device_io_control == (device_io_control_func)-1) {
+	device_io_control = (device_io_control_func)
+	    get_proc_address("kernel32", "DeviceIoControl", NULL);
+    }
+    if (!device_io_control) {
+	errno = ENOSYS;
+	return -1;
+    }
+
+    f = CreateFileW(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE,
+		    NULL, OPEN_EXISTING,
+		    FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,
+		    NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+	errno = map_errno(GetLastError());
+	return -1;
+    }
+
+    if (!device_io_control(f, FSCTL_GET_REPARSE_POINT, NULL, 0,
+			 &rp, sizeof(rp), &ret, NULL)) {
+	e = map_errno(GetLastError());
+    }
+    else if (rp.ReparseTag != IO_REPARSE_TAG_SYMLINK &&
+	     rp.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT){
+	e = EINVAL;
+    }
+    else {
+	void *name;
+	if (rp.ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+	    name = ((char *)rp.SymbolicLinkReparseBuffer.PathBuffer +
+		    rp.SymbolicLinkReparseBuffer.PrintNameOffset);
+	    ret = rp.SymbolicLinkReparseBuffer.PrintNameLength;
+	}
+	else { /* IO_REPARSE_TAG_MOUNT_POINT */
+	    /* +4/-4 means to drop "\??\" */
+	    name = ((char *)rp.MountPointReparseBuffer.PathBuffer +
+		    rp.MountPointReparseBuffer.SubstituteNameOffset +
+		    4 * sizeof(WCHAR));
+	    ret = rp.MountPointReparseBuffer.SubstituteNameLength -
+		  4 * sizeof(WCHAR);
+	}
+	((WCHAR *)name)[ret/sizeof(WCHAR)] = L'\0';
+	translate_wchar(name, L'\\', L'/');
+	bufsize *= sizeof(WCHAR);
+	memcpy(buf, name, ret > bufsize ? bufsize : ret);
+    }
+
+    CloseHandle(f);
+    if (e) {
+	errno = e;
+	return -1;
+    }
+    return ret / sizeof(WCHAR);
+}
+
+/* License: Ruby's */
+static ssize_t
+w32_readlink(UINT cp, const char *path, char *buf, size_t bufsize)
+{
+    WCHAR *wpath;
+    WCHAR wbuf[MAXPATHLEN];
+    ssize_t ret;
+
+    wpath = mbstr_to_wstr(cp, path, -1, NULL);
+    if (!wpath) return -1;
+    ret = rb_w32_wreadlink(wpath, wbuf, MAXPATHLEN);
+    free(wpath);
+    if (ret < 0) return ret;
+    ret = WideCharToMultiByte(cp, 0, wbuf, ret, buf, bufsize, NULL, NULL);
+    if (!ret) {
+	int e = GetLastError();
+	if (e == ERROR_INSUFFICIENT_BUFFER) {
+	    ret = bufsize;
+	}
+	else {
+	    errno = map_errno(e);
+	    ret = -1;
+	}
+    }
+    return ret;
+}
+
+/* License: Ruby's */
+ssize_t
+rb_w32_ureadlink(const char *path, char *buf, size_t bufsize)
+{
+    return w32_readlink(CP_UTF8, path, buf, bufsize);
+}
+
+/* License: Ruby's */
+ssize_t
+readlink(const char *path, char *buf, size_t bufsize)
+{
+    return w32_readlink(filecp(), path, buf, bufsize);
+}
+
+/* License: Ruby's */
 int
 wait(int *status)
 {
@@ -4701,6 +4838,31 @@ rb_w32_getenv(const char *name)
     return w32_getenv(name, CP_ACP);
 }
 
+/* License: Ruby's */
+static DWORD
+get_volume_serial_number(const WCHAR *path)
+{
+    const DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    const DWORD creation = OPEN_EXISTING;
+    const DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+    BY_HANDLE_FILE_INFORMATION st = {0};
+    HANDLE h = CreateFileW(path, 0, share_mode, NULL, creation, flags, NULL);
+    BOOL ret;
+
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    ret = GetFileInformationByHandle(h, &st);
+    CloseHandle(h);
+    if (!ret) return 0;
+    return st.dwVolumeSerialNumber;
+}
+
+/* License: Ruby's */
+static int
+different_device_p(const WCHAR *oldpath, const WCHAR *newpath)
+{
+    return get_volume_serial_number(oldpath) != get_volume_serial_number(newpath);
+}
+
 /* License: Artistic or GPL */
 static int
 wrename(const WCHAR *oldpath, const WCHAR *newpath)
@@ -4724,8 +4886,14 @@ wrename(const WCHAR *oldpath, const WCHAR *newpath)
 	if (!MoveFileExW(oldpath, newpath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
 	    res = -1;
 
-	if (res)
-	    errno = map_errno(GetLastError());
+	if (res) {
+	    DWORD e = GetLastError();
+	    if ((e == ERROR_ACCESS_DENIED) && (oldatts & FILE_ATTRIBUTE_DIRECTORY) &&
+		different_device_p(oldpath, newpath))
+		errno = EXDEV;
+	    else
+		errno = map_errno(e);
+	}
 	else
 	    SetFileAttributesW(newpath, oldatts);
     });
@@ -4811,6 +4979,8 @@ isUNCRoot(const WCHAR *path)
     } while (0)
 
 static time_t filetime_to_unixtime(const FILETIME *ft);
+static WCHAR *name_for_stat(WCHAR *buf, const WCHAR *path);
+static DWORD stati64_handle(HANDLE h, struct stati64 *st);
 
 #undef fstat
 /* License: Ruby's */
@@ -4821,17 +4991,8 @@ rb_w32_fstat(int fd, struct stat *st)
     int ret = fstat(fd, st);
 
     if (ret) return ret;
-#ifdef __BORLANDC__
-    st->st_mode &= ~(S_IWGRP | S_IWOTH);
-#else
     if (GetEnvironmentVariableW(L"TZ", NULL, 0) == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return ret;
-#endif
     if (GetFileInformationByHandle((HANDLE)_get_osfhandle(fd), &info)) {
-#ifdef __BORLANDC__
-	if (!(info.dwFileAttributes & FILE_ATTRIBUTE_READONLY)) {
-	    st->st_mode |= S_IWUSR;
-	}
-#endif
 	st->st_atime = filetime_to_unixtime(&info.ftLastAccessTime);
 	st->st_mtime = filetime_to_unixtime(&info.ftLastWriteTime);
 	st->st_ctime = filetime_to_unixtime(&info.ftCreationTime);
@@ -4843,32 +5004,34 @@ rb_w32_fstat(int fd, struct stat *st)
 int
 rb_w32_fstati64(int fd, struct stati64 *st)
 {
-    BY_HANDLE_FILE_INFORMATION info;
     struct stat tmp;
     int ret;
 
-#ifndef __BORLANDC__
     if (GetEnvironmentVariableW(L"TZ", NULL, 0) == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return _fstati64(fd, st);
-#endif
     ret = fstat(fd, &tmp);
 
     if (ret) return ret;
-#ifdef __BORLANDC__
-    tmp.st_mode &= ~(S_IWGRP | S_IWOTH);
-#endif
     COPY_STAT(tmp, *st, +);
-    if (GetFileInformationByHandle((HANDLE)_get_osfhandle(fd), &info)) {
-#ifdef __BORLANDC__
-	if (!(info.dwFileAttributes & FILE_ATTRIBUTE_READONLY)) {
-	    st->st_mode |= S_IWUSR;
-	}
-#endif
+    stati64_handle((HANDLE)_get_osfhandle(fd), st);
+    return ret;
+}
+
+/* License: Ruby's */
+static DWORD
+stati64_handle(HANDLE h, struct stati64 *st)
+{
+    BY_HANDLE_FILE_INFORMATION info;
+    DWORD attr = (DWORD)-1;
+
+    if (GetFileInformationByHandle(h, &info)) {
 	st->st_size = ((__int64)info.nFileSizeHigh << 32) | info.nFileSizeLow;
 	st->st_atime = filetime_to_unixtime(&info.ftLastAccessTime);
 	st->st_mtime = filetime_to_unixtime(&info.ftLastWriteTime);
 	st->st_ctime = filetime_to_unixtime(&info.ftCreationTime);
+	st->st_nlink = info.nNumberOfLinks;
+	attr = info.dwFileAttributes;
     }
-    return ret;
+    return attr;
 }
 
 /* License: Ruby's */
@@ -4896,7 +5059,10 @@ fileattr_to_unixmode(DWORD attr, const WCHAR *path)
 	mode |= S_IREAD | S_IWRITE | S_IWUSR;
     }
 
-    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+	mode |= S_IFLNK | S_IEXEC;
+    }
+    else if (attr & FILE_ATTRIBUTE_DIRECTORY) {
 	mode |= S_IFDIR | S_IEXEC;
     }
     else {
@@ -4919,8 +5085,8 @@ fileattr_to_unixmode(DWORD attr, const WCHAR *path)
 	}
     }
 
-    mode |= (mode & 0700) >> 3;
-    mode |= (mode & 0700) >> 6;
+    mode |= (mode & 0500) >> 3;
+    mode |= (mode & 0500) >> 6;
 
     return mode;
 }
@@ -4964,23 +5130,110 @@ check_valid_dir(const WCHAR *path)
 
 /* License: Ruby's */
 static int
-winnt_stat(const WCHAR *path, struct stati64 *st)
+stat_by_find(const WCHAR *path, struct stati64 *st)
 {
     HANDLE h;
     WIN32_FIND_DATAW wfd;
+    /* GetFileAttributesEx failed; check why. */
+    int e = GetLastError();
+
+    if ((e == ERROR_FILE_NOT_FOUND) || (e == ERROR_INVALID_NAME)
+	|| (e == ERROR_PATH_NOT_FOUND || (e == ERROR_BAD_NETPATH))) {
+	errno = map_errno(e);
+	return -1;
+    }
+
+    /* Fall back to FindFirstFile for ERROR_SHARING_VIOLATION */
+    h = FindFirstFileW(path, &wfd);
+    if (h == INVALID_HANDLE_VALUE) {
+	errno = map_errno(GetLastError());
+	return -1;
+    }
+    FindClose(h);
+    st->st_mode  = fileattr_to_unixmode(wfd.dwFileAttributes, path);
+    st->st_atime = filetime_to_unixtime(&wfd.ftLastAccessTime);
+    st->st_mtime = filetime_to_unixtime(&wfd.ftLastWriteTime);
+    st->st_ctime = filetime_to_unixtime(&wfd.ftCreationTime);
+    st->st_size = ((__int64)wfd.nFileSizeHigh << 32) | wfd.nFileSizeLow;
+    st->st_nlink = 1;
+    return 0;
+}
+
+/* License: Ruby's */
+static int
+path_drive(const WCHAR *path)
+{
+    return (iswalpha(path[0]) && path[1] == L':') ?
+	towupper(path[0]) - L'A' : _getdrive() - 1;
+}
+
+static const WCHAR namespace_prefix[] = {L'\\', L'\\', L'?', L'\\'};
+
+/* License: Ruby's */
+static int
+winnt_stat(const WCHAR *path, struct stati64 *st)
+{
+    HANDLE f;
+
+    typedef DWORD (WINAPI *get_final_path_func)(HANDLE, WCHAR*, DWORD, DWORD);
+    static get_final_path_func get_final_path = (get_final_path_func)-1;
+
+    if (get_final_path == (get_final_path_func)-1) {
+	get_final_path = (get_final_path_func)
+	    get_proc_address("kernel32", "GetFinalPathNameByHandleW", NULL);
+    }
+
+    memset(st, 0, sizeof(*st));
+    f = CreateFileW(path, 0, 0, NULL, OPEN_EXISTING,
+		    FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+	WCHAR finalname[MAX_PATH];
+	const DWORD attr = stati64_handle(f, st);
+	const DWORD len = get_final_path ?
+	    get_final_path(f, finalname, numberof(finalname), 0) : 0;
+	CloseHandle(f);
+	if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+	    if (check_valid_dir(path)) return -1;
+	}
+	st->st_mode = fileattr_to_unixmode(attr, path);
+	if (len) {
+	    finalname[len] = L'\0';
+	    path = finalname;
+	    if (wcsncmp(path, namespace_prefix, numberof(namespace_prefix)) == 0)
+		path += numberof(namespace_prefix);
+	}
+    }
+    else {
+	if (stat_by_find(path, st)) return -1;
+    }
+
+    st->st_dev = st->st_rdev = path_drive(path);
+
+    return 0;
+}
+
+/* License: Ruby's */
+static int
+winnt_lstat(const WCHAR *path, struct stati64 *st)
+{
     WIN32_FILE_ATTRIBUTE_DATA wfa;
     const WCHAR *p = path;
 
     memset(st, 0, sizeof(*st));
     st->st_nlink = 1;
 
-    if (wcsncmp(p, L"\\\\?\\", 4) == 0) p += 4;
+    if (wcsncmp(p, namespace_prefix, numberof(namespace_prefix)) == 0)
+	p += numberof(namespace_prefix);
     if (wcspbrk(p, L"?*")) {
 	errno = ENOENT;
 	return -1;
     }
     if (GetFileAttributesExW(path, GetFileExInfoStandard, (void*)&wfa)) {
-	if (wfa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+	if (wfa.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+	    /* TODO: size in which encoding? */
+	    st->st_size = 0;
+	}
+	else if (wfa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
 	    if (check_valid_dir(path)) return -1;
 	    st->st_size = 0;
 	}
@@ -4993,33 +5246,10 @@ winnt_stat(const WCHAR *path, struct stati64 *st)
 	st->st_ctime = filetime_to_unixtime(&wfa.ftCreationTime);
     }
     else {
-	/* GetFileAttributesEx failed; check why. */
-	int e = GetLastError();
-
-	if ((e == ERROR_FILE_NOT_FOUND) || (e == ERROR_INVALID_NAME)
-	    || (e == ERROR_PATH_NOT_FOUND || (e == ERROR_BAD_NETPATH))) {
-	    errno = map_errno(e);
-	    return -1;
-	}
-
-	/* Fall back to FindFirstFile for ERROR_SHARING_VIOLATION */
-	h = FindFirstFileW(path, &wfd);
-	if (h != INVALID_HANDLE_VALUE) {
-	    FindClose(h);
-	    st->st_mode  = fileattr_to_unixmode(wfd.dwFileAttributes, path);
-	    st->st_atime = filetime_to_unixtime(&wfd.ftLastAccessTime);
-	    st->st_mtime = filetime_to_unixtime(&wfd.ftLastWriteTime);
-	    st->st_ctime = filetime_to_unixtime(&wfd.ftCreationTime);
-	    st->st_size = ((__int64)wfd.nFileSizeHigh << 32) | wfd.nFileSizeLow;
-	}
-	else {
-	    errno = map_errno(GetLastError());
-	    return -1;
-	}
+	if (stat_by_find(path, st)) return -1;
     }
 
-    st->st_dev = st->st_rdev = (iswalpha(path[0]) && path[1] == L':') ?
-	towupper(path[0]) - L'A' : _getdrive() - 1;
+    st->st_dev = st->st_rdev = path_drive(path);
 
     return 0;
 }
@@ -5039,10 +5269,8 @@ rb_w32_stat(const char *path, struct stat *st)
 static int
 wstati64(const WCHAR *path, struct stati64 *st)
 {
-    const WCHAR *p;
-    WCHAR *buf1, *s, *end;
-    int len, size;
-    int ret;
+    WCHAR *buf1;
+    int ret, size;
     VALUE v;
 
     if (!path || !st) {
@@ -5051,6 +5279,46 @@ wstati64(const WCHAR *path, struct stati64 *st)
     }
     size = lstrlenW(path) + 2;
     buf1 = ALLOCV_N(WCHAR, v, size);
+    if (!(path = name_for_stat(buf1, path)))
+	return -1;
+    ret = winnt_stat(path, st);
+    if (v)
+	ALLOCV_END(v);
+
+    return ret;
+}
+
+/* License: Ruby's */
+static int
+wlstati64(const WCHAR *path, struct stati64 *st)
+{
+    WCHAR *buf1;
+    int ret, size;
+    VALUE v;
+
+    if (!path || !st) {
+	errno = EFAULT;
+	return -1;
+    }
+    size = lstrlenW(path) + 2;
+    buf1 = ALLOCV_N(WCHAR, v, size);
+    if (!(path = name_for_stat(buf1, path)))
+	return -1;
+    ret = winnt_lstat(path, st);
+    if (v)
+	ALLOCV_END(v);
+
+    return ret;
+}
+
+/* License: Ruby's */
+static WCHAR *
+name_for_stat(WCHAR *buf1, const WCHAR *path)
+{
+    const WCHAR *p;
+    WCHAR *s, *end;
+    int len;
+
     for (p = path, s = buf1; *p; p++, s++) {
 	if (*p == L'/')
 	    *s = L'\\';
@@ -5061,7 +5329,7 @@ wstati64(const WCHAR *path, struct stati64 *st)
     len = s - buf1;
     if (!len || L'\"' == *(--s)) {
 	errno = ENOENT;
-	return -1;
+	return NULL;
     }
     end = buf1 + len - 1;
 
@@ -5074,14 +5342,7 @@ wstati64(const WCHAR *path, struct stati64 *st)
     else if (*end == L'\\' || (buf1 + 1 == end && *end == L':'))
 	lstrcatW(buf1, L".");
 
-    ret = winnt_stat(buf1, st);
-    if (ret == 0) {
-	st->st_mode &= ~(S_IWGRP | S_IWOTH);
-    }
-    if (v)
-	ALLOCV_END(v);
-
-    return ret;
+    return buf1;
 }
 
 /* License: Ruby's */
@@ -5108,6 +5369,34 @@ w32_stati64(const char *path, struct stati64 *st, UINT cp)
     if (!(wpath = mbstr_to_wstr(cp, path, -1, NULL)))
 	return -1;
     ret = wstati64(wpath, st);
+    free(wpath);
+    return ret;
+}
+
+/* License: Ruby's */
+int
+rb_w32_ulstati64(const char *path, struct stati64 *st)
+{
+    return w32_lstati64(path, st, CP_UTF8);
+}
+
+/* License: Ruby's */
+int
+rb_w32_lstati64(const char *path, struct stati64 *st)
+{
+    return w32_lstati64(path, st, filecp());
+}
+
+/* License: Ruby's */
+static int
+w32_lstati64(const char *path, struct stati64 *st, UINT cp)
+{
+    WCHAR *wpath;
+    int ret;
+
+    if (!(wpath = mbstr_to_wstr(cp, path, -1, NULL)))
+	return -1;
+    ret = wlstati64(wpath, st);
     free(wpath);
     return ret;
 }
@@ -5198,44 +5487,6 @@ rb_w32_ftruncate(int fd, off_t length)
     return rb_chsize(h, length);
 }
 
-#ifdef __BORLANDC__
-/* License: Ruby's */
-off_t
-_filelengthi64(int fd)
-{
-    DWORD u, l;
-    int e;
-
-    l = GetFileSize((HANDLE)_get_osfhandle(fd), &u);
-    if (l == (DWORD)-1L && (e = GetLastError())) {
-	errno = map_errno(e);
-	return (off_t)-1;
-    }
-    return ((off_t)u << 32) | l;
-}
-
-/* License: Ruby's */
-off_t
-_lseeki64(int fd, off_t offset, int whence)
-{
-    long u, l;
-    int e;
-    HANDLE h = (HANDLE)_get_osfhandle(fd);
-
-    if (!h) {
-	errno = EBADF;
-	return -1;
-    }
-    u = (long)(offset >> 32);
-    if ((l = SetFilePointer(h, (long)offset, &u, whence)) == -1L &&
-	(e = GetLastError())) {
-	errno = map_errno(e);
-	return -1;
-    }
-    return ((off_t)u << 32) | l;
-}
-#endif
-
 /* License: Ruby's */
 static long
 filetime_to_clock(FILETIME *ft)
@@ -5268,72 +5519,10 @@ rb_w32_times(struct tms *tmbuf)
     return 0;
 }
 
+
+/* License: Ruby's */
 #define yield_once() Sleep(0)
 #define yield_until(condition) do yield_once(); while (!(condition))
-
-/* License: Ruby's */
-static void
-catch_interrupt(void)
-{
-    yield_once();
-    RUBY_CRITICAL(rb_w32_wait_events(NULL, 0, 0));
-}
-
-#if defined __BORLANDC__
-#undef read
-/* License: Ruby's */
-int
-read(int fd, void *buf, size_t size)
-{
-    int ret = _read(fd, buf, size);
-    if ((ret < 0) && (errno == EPIPE)) {
-	errno = 0;
-	ret = 0;
-    }
-    catch_interrupt();
-    return ret;
-}
-#endif
-
-
-#define FILE_COUNT _cnt
-#define FILE_READPTR _ptr
-
-#undef fgetc
-/* License: Ruby's */
-int
-rb_w32_getc(FILE* stream)
-{
-    int c;
-    if (enough_to_get(stream->FILE_COUNT)) {
-	c = (unsigned char)*stream->FILE_READPTR++;
-    }
-    else {
-	c = _filbuf(stream);
-#if defined __BORLANDC__
-        if ((c == EOF) && (errno == EPIPE)) {
-	    clearerr(stream);
-        }
-#endif
-	catch_interrupt();
-    }
-    return c;
-}
-
-#undef fputc
-/* License: Ruby's */
-int
-rb_w32_putc(int c, FILE* stream)
-{
-    if (enough_to_put(stream->FILE_COUNT)) {
-	c = (unsigned char)(*stream->FILE_READPTR++ = (char)c);
-    }
-    else {
-	c = _flsbuf(c, stream);
-	catch_interrupt();
-    }
-    return c;
-}
 
 /* License: Ruby's */
 struct asynchronous_arg_t {
@@ -5733,7 +5922,7 @@ rb_w32_wopen(const WCHAR *file, int oflag, ...)
 	return -1;
     }
     RUBY_CRITICAL({
-	MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fd)->lock)));
+	rb_acrt_lowio_lock_fh(fd);
 	_set_osfhnd(fd, (intptr_t)INVALID_HANDLE_VALUE);
 	_set_osflags(fd, 0);
 
@@ -5743,7 +5932,7 @@ rb_w32_wopen(const WCHAR *file, int oflag, ...)
 	    DWORD e = GetLastError();
 	    if (e != ERROR_ACCESS_DENIED || !check_if_wdir(file))
 		errno = map_errno(e);
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    fd = -1;
 	    goto quit;
 	}
@@ -5758,7 +5947,7 @@ rb_w32_wopen(const WCHAR *file, int oflag, ...)
 	  case FILE_TYPE_UNKNOWN:
 	    errno = map_errno(GetLastError());
 	    CloseHandle(h);
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    fd = -1;
 	    goto quit;
 	}
@@ -5766,9 +5955,9 @@ rb_w32_wopen(const WCHAR *file, int oflag, ...)
 	    flags |= FAPPEND;
 
 	_set_osfhnd(fd, (intptr_t)h);
-	_osfile(fd) = flags | FOPEN;
+	_set_osflags(fd, flags | FOPEN);
 
-	MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	rb_acrt_lowio_unlock_fh(fd);
       quit:
 	;
     });
@@ -5865,10 +6054,10 @@ rb_w32_pipe(int fds[2])
 	    break;
 	}
 
-	MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fdRead)->lock)));
+	rb_acrt_lowio_lock_fh(fdRead);
 	_set_osfhnd(fdRead, (intptr_t)hRead);
 	_set_osflags(fdRead, FOPEN | FPIPE | FNOINHERIT);
-	MTHREAD_ONLY(LeaveCriticalSection(&(_pioinfo(fdRead)->lock)));
+	rb_acrt_lowio_unlock_fh(fdRead);
     } while (0));
     if (ret)
 	return ret;
@@ -5883,10 +6072,10 @@ rb_w32_pipe(int fds[2])
 	    ret = -1;
 	    break;
 	}
-	MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fdWrite)->lock)));
+	rb_acrt_lowio_lock_fh(fdWrite);
 	_set_osfhnd(fdWrite, (intptr_t)hWrite);
 	_set_osflags(fdWrite, FOPEN | FPIPE | FNOINHERIT);
-	MTHREAD_ONLY(LeaveCriticalSection(&(_pioinfo(fdWrite)->lock)));
+	rb_acrt_lowio_unlock_fh(fdWrite);
     } while (0));
     if (ret) {
 	rb_w32_close(fdRead);
@@ -6357,11 +6546,11 @@ rb_w32_read(int fd, void *buf, size_t size)
 	return _read(fd, buf, size);
     }
 
-    MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fd)->lock)));
+    rb_acrt_lowio_lock_fh(fd);
 
     if (!size || _osfile(fd) & FEOFLAG) {
 	_set_osflags(fd, _osfile(fd) & ~FEOFLAG);
-	MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	rb_acrt_lowio_unlock_fh(fd);
 	return 0;
     }
 
@@ -6390,7 +6579,7 @@ rb_w32_read(int fd, void *buf, size_t size)
     /* if have cancel_io, use Overlapped I/O */
     if (cancel_io) {
 	if (setup_overlapped(&ol, fd)) {
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    return -1;
 	}
 
@@ -6407,7 +6596,7 @@ rb_w32_read(int fd, void *buf, size_t size)
 	    else {
 		errno = map_errno(err);
 	    }
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    return -1;
 	}
 	else if (err != ERROR_IO_PENDING) {
@@ -6415,13 +6604,13 @@ rb_w32_read(int fd, void *buf, size_t size)
 	    if (err == ERROR_ACCESS_DENIED)
 		errno = EBADF;
 	    else if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		return 0;
 	    }
 	    else
 		errno = map_errno(err);
 
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    return -1;
 	}
 
@@ -6434,7 +6623,7 @@ rb_w32_read(int fd, void *buf, size_t size)
 		    errno = map_errno(GetLastError());
 		CloseHandle(ol.hEvent);
 		cancel_io((HANDLE)_osfhnd(fd));
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		return -1;
 	    }
 
@@ -6447,7 +6636,7 @@ rb_w32_read(int fd, void *buf, size_t size)
 		}
 		CloseHandle(ol.hEvent);
 		cancel_io((HANDLE)_osfhnd(fd));
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		return ret;
 	    }
 	}
@@ -6472,7 +6661,7 @@ rb_w32_read(int fd, void *buf, size_t size)
 	_set_osflags(fd, _osfile(fd) | FEOFLAG);
 
 
-    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+    rb_acrt_lowio_unlock_fh(fd);
 
     return ret;
 }
@@ -6503,10 +6692,10 @@ rb_w32_write(int fd, const void *buf, size_t size)
 	return _write(fd, buf, size);
     }
 
-    MTHREAD_ONLY(EnterCriticalSection(&(_pioinfo(fd)->lock)));
+    rb_acrt_lowio_lock_fh(fd);
 
     if (!size || _osfile(fd) & FEOFLAG) {
-	MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	rb_acrt_lowio_unlock_fh(fd);
 	return 0;
     }
 
@@ -6520,7 +6709,7 @@ rb_w32_write(int fd, const void *buf, size_t size)
     /* if have cancel_io, use Overlapped I/O */
     if (cancel_io) {
 	if (setup_overlapped(&ol, fd)) {
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    return -1;
 	}
 
@@ -6536,7 +6725,7 @@ rb_w32_write(int fd, const void *buf, size_t size)
 	    else
 		errno = map_errno(err);
 
-	    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+	    rb_acrt_lowio_unlock_fh(fd);
 	    return -1;
 	}
 
@@ -6549,7 +6738,7 @@ rb_w32_write(int fd, const void *buf, size_t size)
 		    errno = map_errno(GetLastError());
 		CloseHandle(ol.hEvent);
 		cancel_io((HANDLE)_osfhnd(fd));
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		return -1;
 	    }
 
@@ -6558,7 +6747,7 @@ rb_w32_write(int fd, const void *buf, size_t size)
 		errno = map_errno(GetLastError());
 		CloseHandle(ol.hEvent);
 		cancel_io((HANDLE)_osfhnd(fd));
-		MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+		rb_acrt_lowio_unlock_fh(fd);
 		return -1;
 	    }
 	}
@@ -6585,7 +6774,7 @@ rb_w32_write(int fd, const void *buf, size_t size)
 	errno = EWOULDBLOCK;
     }
 
-    MTHREAD_ONLY(LeaveCriticalSection(&_pioinfo(fd)->lock));
+    rb_acrt_lowio_unlock_fh(fd);
 
     return ret;
 }
@@ -6912,7 +7101,6 @@ rb_w32_uchmod(const char *path, int mode)
     return ret;
 }
 
-#if !defined(__BORLANDC__)
 /* License: Ruby's */
 int
 rb_w32_isatty(int fd)
@@ -6929,63 +7117,6 @@ rb_w32_isatty(int fd)
     }
     return 1;
 }
-#endif
-
-//
-// Fix bcc32's stdio bug
-//
-
-#ifdef __BORLANDC__
-/* License: Ruby's */
-static int
-too_many_files(void)
-{
-    FILE *f;
-    for (f = _streams; f < _streams + _nfile; f++) {
-	if (f->fd < 0) return 0;
-    }
-    return 1;
-}
-
-#undef fopen
-/* License: Ruby's */
-FILE *
-rb_w32_fopen(const char *path, const char *mode)
-{
-    FILE *f = (errno = 0, fopen(path, mode));
-    if (f == NULL && errno == 0) {
-	if (too_many_files())
-	    errno = EMFILE;
-    }
-    return f;
-}
-
-/* License: Ruby's */
-FILE *
-rb_w32_fdopen(int handle, const char *type)
-{
-    FILE *f = (errno = 0, _fdopen(handle, (char *)type));
-    if (f == NULL && errno == 0) {
-	if (handle < 0)
-	    errno = EBADF;
-	else if (too_many_files())
-	    errno = EMFILE;
-    }
-    return f;
-}
-
-/* License: Ruby's */
-FILE *
-rb_w32_fsopen(const char *path, const char *mode, int shflags)
-{
-    FILE *f = (errno = 0, _fsopen(path, mode, shflags));
-    if (f == NULL && errno == 0) {
-	if (too_many_files())
-	    errno = EMFILE;
-    }
-    return f;
-}
-#endif
 
 #if defined(_MSC_VER) && RUBY_MSVCRT_VERSION <= 60
 extern long _ftol(double);

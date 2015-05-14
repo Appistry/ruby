@@ -33,18 +33,16 @@ class TestEnumerable < Test::Unit::TestCase
     $VERBOSE = @verbose
   end
 
-  def assert_not_warn
-    begin
-      org_stderr = $stderr
-      v = $VERBOSE
-      $stderr = StringIO.new(warn = '')
-      $VERBOSE = true
-      yield
-    ensure
-      $stderr = org_stderr
-      $VERBOSE = v
-    end
-    assert_equal("", warn)
+  def test_grep_v
+    assert_equal([3], @obj.grep_v(1..2))
+    a = []
+    @obj.grep_v(2) {|x| a << x }
+    assert_equal([1, 3, 1], a)
+
+    a = []
+    lambda = ->(x, i) {a << [x, i]}
+    @obj.each_with_index.grep_v(proc{|x,i|x!=2}, &lambda)
+    assert_equal([[2, 1], [2, 4]], a)
   end
 
   def test_grep
@@ -112,6 +110,36 @@ class TestEnumerable < Test::Unit::TestCase
 
   def test_to_a
     assert_equal([1, 2, 3, 1, 2], @obj.to_a)
+  end
+
+  def test_to_a_size_symbol
+    sym = Object.new
+    class << sym
+      include Enumerable
+      def each
+        self
+      end
+
+      def size
+        :size
+      end
+    end
+    assert_equal([], sym.to_a)
+  end
+
+  def test_to_a_size_infinity
+    inf = Object.new
+    class << inf
+      include Enumerable
+      def each
+        self
+      end
+
+      def size
+        Float::INFINITY
+      end
+    end
+    assert_equal([], inf.to_a)
   end
 
   def test_to_h
@@ -348,6 +376,14 @@ class TestEnumerable < Test::Unit::TestCase
     ary.clear
     (1..10).each_slice(3, &lambda {|a, *| ary << a})
     assert_equal([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10]], ary, bug9749)
+
+    ary.clear
+    (1..10).each_slice(10) {|a| ary << a}
+    assert_equal([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], ary)
+
+    ary.clear
+    (1..10).each_slice(11) {|a| ary << a}
+    assert_equal([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], ary)
   end
 
   def test_each_cons
@@ -359,6 +395,14 @@ class TestEnumerable < Test::Unit::TestCase
     ary.clear
     (1..5).each_cons(3, &lambda {|a, *| ary << a})
     assert_equal([[1, 2, 3], [2, 3, 4], [3, 4, 5]], ary, bug9749)
+
+    ary.clear
+    (1..5).each_cons(5) {|a| ary << a}
+    assert_equal([[1, 2, 3, 4, 5]], ary)
+
+    ary.clear
+    (1..5).each_cons(6) {|a| ary << a}
+    assert_empty(ary)
   end
 
   def test_zip
@@ -465,22 +509,6 @@ class TestEnumerable < Test::Unit::TestCase
     e = @obj.chunk {|elt| elt & 2 == 0 ? false : true }
     assert_equal([[false, [1]], [true, [2, 3]], [false, [1]], [true, [2]]], e.to_a)
 
-    e = @obj.chunk(acc: 0) {|elt, h| h[:acc] += elt; h[:acc].even? }
-    assert_equal([[false, [1,2]], [true, [3]], [false, [1,2]]], e.to_a)
-    assert_equal([[false, [1,2]], [true, [3]], [false, [1,2]]], e.to_a) # this tests h is duplicated.
-
-    hs = [{}]
-    e = [:foo].chunk(hs[0]) {|elt, h|
-      hs << h
-      true
-    }
-    assert_equal([[true, [:foo]]], e.to_a)
-    assert_equal([[true, [:foo]]], e.to_a)
-    assert_equal([{}, {}, {}], hs)
-    assert_not_same(hs[0], hs[1])
-    assert_not_same(hs[0], hs[2])
-    assert_not_same(hs[1], hs[2])
-
     e = @obj.chunk {|elt| elt < 3 ? :_alone : true }
     assert_equal([[:_alone, [1]],
                   [:_alone, [2]],
@@ -510,26 +538,10 @@ class TestEnumerable < Test::Unit::TestCase
     e = @obj.slice_before {|elt| elt.odd? }
     assert_equal([[1,2], [3], [1,2]], e.to_a)
 
-    e = @obj.slice_before(acc: 0) {|elt, h| h[:acc] += elt; h[:acc].even? }
-    assert_equal([[1,2], [3,1,2]], e.to_a)
-    assert_equal([[1,2], [3,1,2]], e.to_a) # this tests h is duplicated.
-
-    hs = [{}]
-    e = [:foo].slice_before(hs[0]) {|elt, h|
-      hs << h
-      true
-    }
-    assert_equal([[:foo]], e.to_a)
-    assert_equal([[:foo]], e.to_a)
-    assert_equal([{}, {}, {}], hs)
-    assert_not_same(hs[0], hs[1])
-    assert_not_same(hs[0], hs[2])
-    assert_not_same(hs[1], hs[2])
-
     ss = %w[abc defg h ijk l mno pqr st u vw xy z]
     assert_equal([%w[abc defg h], %w[ijk l], %w[mno], %w[pqr st u vw xy z]],
                  ss.slice_before(/\A...\z/).to_a)
-    assert_not_warn{ss.slice_before(/\A...\z/).to_a}
+    assert_warning("") {ss.slice_before(/\A...\z/).to_a}
   end
 
   def test_slice_after0

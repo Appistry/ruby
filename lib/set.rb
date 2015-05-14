@@ -78,7 +78,7 @@ class Set
   # If a block is given, the elements of enum are preprocessed by the
   # given block.
   def initialize(enum = nil, &block) # :yields: o
-    @hash ||= Hash.new
+    @hash ||= Hash.new(false)
 
     enum.nil? and return
 
@@ -208,8 +208,13 @@ class Set
   end
 
   # Returns true if the set contains the given object.
+  #
+  # Note that <code>include?</code> and <code>member?</code> do not test member
+  # equality using <code>==</code> as do other Enumerables.
+  #
+  # See also Enumerable#include?
   def include?(o)
-    @hash.include?(o)
+    @hash[o]
   end
   alias member? include?
 

@@ -651,6 +651,13 @@ rb_io_check_closed(rb_io_t *fptr)
     }
 }
 
+static rb_io_t *
+rb_io_get_fptr(VALUE io)
+{
+    rb_io_t *fptr = RFILE(io)->fptr;
+    rb_io_check_initialized(fptr);
+    return fptr;
+}
 
 VALUE
 rb_io_get_io(VALUE io)
@@ -668,8 +675,7 @@ VALUE
 rb_io_get_write_io(VALUE io)
 {
     VALUE write_io;
-    rb_io_check_initialized(RFILE(io)->fptr);
-    write_io = RFILE(io)->fptr->tied_io_for_writing;
+    write_io = rb_io_get_fptr(io)->tied_io_for_writing;
     if (write_io) {
         return write_io;
     }
@@ -680,15 +686,15 @@ VALUE
 rb_io_set_write_io(VALUE io, VALUE w)
 {
     VALUE write_io;
-    rb_io_check_initialized(RFILE(io)->fptr);
+    rb_io_t *fptr = rb_io_get_fptr(io);
     if (!RTEST(w)) {
 	w = 0;
     }
     else {
 	GetWriteIO(w);
     }
-    write_io = RFILE(io)->fptr->tied_io_for_writing;
-    RFILE(io)->fptr->tied_io_for_writing = w;
+    write_io = fptr->tied_io_for_writing;
+    fptr->tied_io_for_writing = w;
     return write_io ? write_io : Qnil;
 }
 
@@ -4415,12 +4421,17 @@ rb_io_close(VALUE io)
  *
  *  If <em>ios</em> is opened by <code>IO.popen</code>,
  *  <code>close</code> sets <code>$?</code>.
+ *
+ *  Calling this method on closed IO object is just ignored since Ruby 2.3.
  */
 
 static VALUE
 rb_io_close_m(VALUE io)
 {
-    rb_io_check_closed(RFILE(io)->fptr);
+    rb_io_t *fptr = rb_io_get_fptr(io);
+    if (fptr->fd < 0) {
+        return Qnil;
+    }
     rb_io_close(io);
     return Qnil;
 }
@@ -4489,8 +4500,7 @@ rb_io_closed(VALUE io)
         }
     }
 
-    fptr = RFILE(io)->fptr;
-    rb_io_check_initialized(fptr);
+    fptr = rb_io_get_fptr(io);
     return 0 <= fptr->fd ? Qfalse : Qtrue;
 }
 
@@ -4518,7 +4528,8 @@ rb_io_close_read(VALUE io)
     rb_io_t *fptr;
     VALUE write_io;
 
-    GetOpenFile(io, fptr);
+    fptr = rb_io_get_fptr(rb_io_taint_check(io));
+    if (fptr->fd < 0) return Qnil;
     if (is_socket(fptr->fd, fptr->pathv)) {
 #ifndef SHUT_RD
 # define SHUT_RD 0
@@ -4534,20 +4545,19 @@ rb_io_close_read(VALUE io)
     write_io = GetWriteIO(io);
     if (io != write_io) {
 	rb_io_t *wfptr;
-	GetOpenFile(write_io, wfptr);
+	wfptr = rb_io_get_fptr(rb_io_taint_check(write_io));
 	wfptr->pid = fptr->pid;
 	fptr->pid = 0;
         RFILE(io)->fptr = wfptr;
 	/* bind to write_io temporarily to get rid of memory/fd leak */
 	fptr->tied_io_for_writing = 0;
-	fptr->mode &= ~FMODE_DUPLEX;
 	RFILE(write_io)->fptr = fptr;
 	rb_io_fptr_cleanup(fptr, FALSE);
 	/* should not finalize fptr because another thread may be reading it */
         return Qnil;
     }
 
-    if (fptr->mode & FMODE_WRITABLE) {
+    if ((fptr->mode & (FMODE_DUPLEX|FMODE_WRITABLE)) == FMODE_WRITABLE) {
 	rb_raise(rb_eIOError, "closing non-duplex IO for reading");
     }
     return rb_io_close(io);
@@ -4579,7 +4589,8 @@ rb_io_close_write(VALUE io)
     VALUE write_io;
 
     write_io = GetWriteIO(io);
-    GetOpenFile(write_io, fptr);
+    fptr = rb_io_get_fptr(rb_io_taint_check(write_io));
+    if (fptr->fd < 0) return Qnil;
     if (is_socket(fptr->fd, fptr->pathv)) {
 #ifndef SHUT_WR
 # define SHUT_WR 1
@@ -4592,14 +4603,13 @@ rb_io_close_write(VALUE io)
         return Qnil;
     }
 
-    if (fptr->mode & FMODE_READABLE) {
+    if ((fptr->mode & (FMODE_DUPLEX|FMODE_READABLE)) == FMODE_READABLE) {
 	rb_raise(rb_eIOError, "closing non-duplex IO for writing");
     }
 
     if (io != write_io) {
-	GetOpenFile(io, fptr);
+	fptr = rb_io_get_fptr(rb_io_taint_check(io));
 	fptr->tied_io_for_writing = 0;
-	fptr->mode &= ~FMODE_DUPLEX;
     }
     rb_io_close(write_io);
     return Qnil;
@@ -5884,7 +5894,7 @@ popen_exec(void *pp, char *errmsg, size_t errmsg_len)
 static VALUE
 rb_execarg_fixup_v(VALUE execarg_obj)
 {
-    rb_execarg_fixup(execarg_obj);
+    rb_execarg_parent_start(execarg_obj);
     return Qnil;
 }
 
@@ -5990,6 +6000,7 @@ pipe_open(VALUE execarg_obj, const char *modestr, int fmode, convconfig_t *convc
             if (0 <= arg.write_pair[1]) close(arg.write_pair[1]);
             if (0 <= arg.pair[0]) close(arg.pair[0]);
             if (0 <= arg.pair[1]) close(arg.pair[1]);
+            rb_execarg_parent_end(execarg_obj);
             rb_jump_tag(state);
         }
 
@@ -6015,6 +6026,7 @@ pipe_open(VALUE execarg_obj, const char *modestr, int fmode, convconfig_t *convc
 	if (eargp)
 	    rb_execarg_run_options(sargp, NULL, NULL, 0);
 # endif
+        rb_execarg_parent_end(execarg_obj);
     }
     else {
 # if defined(HAVE_WORKING_FORK)
@@ -6069,12 +6081,14 @@ pipe_open(VALUE execarg_obj, const char *modestr, int fmode, convconfig_t *convc
 	cmd = StringValueCStr(prog);
     }
     if (!NIL_P(execarg_obj)) {
-	rb_execarg_fixup(execarg_obj);
+	rb_execarg_parent_start(execarg_obj);
 	rb_execarg_run_options(eargp, sargp, NULL, 0);
     }
     fp = popen(cmd, modestr);
-    if (eargp)
+    if (eargp) {
+        rb_execarg_parent_end(execarg_obj);
 	rb_execarg_run_options(sargp, NULL, NULL, 0);
+    }
     if (!fp) rb_sys_fail_path(prog);
     fd = fileno(fp);
 #endif
@@ -9082,7 +9096,8 @@ setup_narg(ioctl_req_t cmd, VALUE *argp, int io_p)
 	    narg = NUM2LONG(arg);
 	}
 	else {
-	    long len;
+	    char *ptr;
+	    long len, slen;
 
 	    *argp = arg = tmp;
 	    if (io_p)
@@ -9091,13 +9106,17 @@ setup_narg(ioctl_req_t cmd, VALUE *argp, int io_p)
 		len = fcntl_narg_len((int)cmd);
 	    rb_str_modify(arg);
 
+	    slen = RSTRING_LEN(arg);
 	    /* expand for data + sentinel. */
-	    if (RSTRING_LEN(arg) < len+1) {
+	    if (slen < len+1) {
 		rb_str_resize(arg, len+1);
+		MEMZERO(RSTRING_PTR(arg)+slen, char, len-slen);
+		slen = len+1;
 	    }
 	    /* a little sanity check here */
-	    RSTRING_PTR(arg)[RSTRING_LEN(arg) - 1] = 17;
-	    narg = (long)(SIGNED_VALUE)RSTRING_PTR(arg);
+	    ptr = RSTRING_PTR(arg);
+	    ptr[slen - 1] = 17;
+	    narg = (long)(SIGNED_VALUE)ptr;
 	}
     }
 
@@ -9120,9 +9139,12 @@ rb_ioctl(VALUE io, VALUE req, VALUE arg)
     retval = do_ioctl(fptr->fd, cmd, narg);
     if (retval < 0) rb_sys_fail_path(fptr->pathv);
     if (RB_TYPE_P(arg, T_STRING)) {
-	if (RSTRING_PTR(arg)[RSTRING_LEN(arg)-1] != 17)
+	char *ptr;
+	long slen;
+	RSTRING_GETMEM(arg, ptr, slen);
+	if (ptr[slen-1] != 17)
 	    rb_raise(rb_eArgError, "return value overflowed string");
-	RSTRING_PTR(arg)[RSTRING_LEN(arg)-1] = '\0';
+	ptr[slen-1] = '\0';
     }
 
     return INT2NUM(retval);
@@ -9206,9 +9228,12 @@ rb_fcntl(VALUE io, VALUE req, VALUE arg)
     retval = do_fcntl(fptr->fd, cmd, narg);
     if (retval < 0) rb_sys_fail_path(fptr->pathv);
     if (RB_TYPE_P(arg, T_STRING)) {
-	if (RSTRING_PTR(arg)[RSTRING_LEN(arg)-1] != 17)
+	char *ptr;
+	long slen;
+	RSTRING_GETMEM(arg, ptr, slen);
+	if (ptr[slen-1] != 17)
 	    rb_raise(rb_eArgError, "return value overflowed string");
-	RSTRING_PTR(arg)[RSTRING_LEN(arg)-1] = '\0';
+	ptr[slen-1] = '\0';
     }
 
     return INT2NUM(retval);
@@ -10445,11 +10470,11 @@ copy_stream_fallback_body(VALUE arg)
             ssize_t ss;
             rb_str_resize(buf, buflen);
             ss = maygvl_copy_stream_read(1, stp, RSTRING_PTR(buf), l, off);
+            rb_str_resize(buf, ss > 0 ? ss : 0);
             if (ss == -1)
                 return Qnil;
             if (ss == 0)
                 rb_eof_error();
-            rb_str_resize(buf, ss);
             if (off != (off_t)-1)
                 off += ss;
         }
@@ -10494,52 +10519,57 @@ copy_stream_body(VALUE arg)
 
     stp->total = 0;
 
-    if (src_io == argf ||
-        !(RB_TYPE_P(src_io, T_FILE) ||
-          RB_TYPE_P(src_io, T_STRING) ||
-          rb_respond_to(src_io, rb_intern("to_path")))) {
-        src_fd = -1;
+    if (src_io == argf) {
+	src_fd = -1;
+    }
+    else if (RB_TYPE_P(src_io, T_FILE)) {
+	goto io_src;
+    }
+    else if (!RB_TYPE_P(src_io, T_STRING) &&
+	     (rb_respond_to(src_io, id_read) ||
+	      rb_respond_to(src_io, id_readpartial))) {
+	src_fd = -1;
     }
     else {
-	if (!RB_TYPE_P(src_io, T_FILE)) {
-            VALUE args[2];
-	    FilePathValue(src_io);
-	    args[0] = src_io;
-	    args[1] = INT2NUM(O_RDONLY|common_oflags);
-            src_io = rb_class_new_instance(2, args, rb_cFile);
-            stp->src = src_io;
-            stp->close_src = 1;
-        }
-        GetOpenFile(src_io, src_fptr);
-        rb_io_check_byte_readable(src_fptr);
-        src_fd = src_fptr->fd;
+	VALUE args[2];
+	FilePathValue(src_io);
+	args[0] = src_io;
+	args[1] = INT2NUM(O_RDONLY|common_oflags);
+	src_io = rb_class_new_instance(2, args, rb_cFile);
+	stp->src = src_io;
+	stp->close_src = 1;
+      io_src:
+	GetOpenFile(src_io, src_fptr);
+	rb_io_check_byte_readable(src_fptr);
+	src_fd = src_fptr->fd;
     }
     stp->src_fd = src_fd;
 
-    if (dst_io == argf ||
-        !(RB_TYPE_P(dst_io, T_FILE) ||
-          RB_TYPE_P(dst_io, T_STRING) ||
-          rb_respond_to(dst_io, rb_intern("to_path")))) {
-        dst_fd = -1;
+    if (dst_io == argf) {
+	dst_fd = -1;
+    }
+    else if (RB_TYPE_P(dst_io, T_FILE)) {
+	dst_io = GetWriteIO(dst_io);
+	stp->dst = dst_io;
+	goto io_dst;
+    }
+    else if (!RB_TYPE_P(dst_io, T_STRING) &&
+	     rb_respond_to(dst_io, id_write)) {
+	dst_fd = -1;
     }
     else {
-	if (!RB_TYPE_P(dst_io, T_FILE)) {
-            VALUE args[3];
-	    FilePathValue(dst_io);
-	    args[0] = dst_io;
-	    args[1] = INT2NUM(O_WRONLY|O_CREAT|O_TRUNC|common_oflags);
-            args[2] = INT2FIX(0666);
-            dst_io = rb_class_new_instance(3, args, rb_cFile);
-            stp->dst = dst_io;
-            stp->close_dst = 1;
-        }
-        else {
-            dst_io = GetWriteIO(dst_io);
-            stp->dst = dst_io;
-        }
-        GetOpenFile(dst_io, dst_fptr);
-        rb_io_check_writable(dst_fptr);
-        dst_fd = dst_fptr->fd;
+	VALUE args[3];
+	FilePathValue(dst_io);
+	args[0] = dst_io;
+	args[1] = INT2NUM(O_WRONLY|O_CREAT|O_TRUNC|common_oflags);
+	args[2] = INT2FIX(0666);
+	dst_io = rb_class_new_instance(3, args, rb_cFile);
+	stp->dst = dst_io;
+	stp->close_dst = 1;
+      io_dst:
+	GetOpenFile(dst_io, dst_fptr);
+	rb_io_check_writable(dst_fptr);
+	dst_fd = dst_fptr->fd;
     }
     stp->dst_fd = dst_fd;
 
@@ -11077,8 +11107,9 @@ argf_read(int argc, VALUE *argv, VALUE argf)
 	}
     }
     else if (argc >= 1) {
-	if (RSTRING_LEN(str) < len) {
-	    len -= RSTRING_LEN(str);
+	long slen = RSTRING_LEN(str);
+	if (slen < len) {
+	    len -= slen;
 	    argv[0] = INT2NUM(len);
 	    goto retry;
 	}
@@ -12056,7 +12087,7 @@ rb_readwrite_sys_fail(int writable, const char *mesg)
  *  Example:
  *
  *    require 'io/console'
- *    rows, columns = $stdin.winsize
+ *    rows, columns = $stdout.winsize
  *    puts "Your screen is #{columns} wide and #{rows} tall"
  */
 

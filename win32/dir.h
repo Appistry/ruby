@@ -8,13 +8,19 @@
 #  endif
 #endif
 
+#define DT_UNKNOWN 0
+#define DT_DIR (S_IFDIR>>12)
+#define DT_REG (S_IFREG>>12)
+#define DT_LNK 10
+
 struct direct
 {
     long d_namlen;
     ino_t d_ino;
     char *d_name;
-    char d_isdir; /* directory */
-    char d_isrep; /* reparse point */
+    char *d_altname; /* short name */
+    short d_altlen;
+    uint8_t d_type;
 };
 typedef struct {
     WCHAR *start;

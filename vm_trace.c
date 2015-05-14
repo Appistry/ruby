@@ -682,8 +682,12 @@ tp_alloc(VALUE klass)
 static rb_event_flag_t
 symbol2event_flag(VALUE v)
 {
-    static ID id;
+    ID id;
     VALUE sym = rb_convert_type(v, T_SYMBOL, "Symbol", "to_sym");
+    const rb_event_flag_t RUBY_EVENT_A_CALL =
+	RUBY_EVENT_CALL | RUBY_EVENT_B_CALL | RUBY_EVENT_C_CALL;
+    const rb_event_flag_t RUBY_EVENT_A_RETURN =
+	RUBY_EVENT_RETURN | RUBY_EVENT_B_RETURN | RUBY_EVENT_C_RETURN;
 
 #define C(name, NAME) CONST_ID(id, #name); if (sym == ID2SYM(id)) return RUBY_EVENT_##NAME
     C(line, LINE);
@@ -699,9 +703,9 @@ symbol2event_flag(VALUE v)
     C(thread_begin, THREAD_BEGIN);
     C(thread_end, THREAD_END);
     C(specified_line, SPECIFIED_LINE);
+    C(a_call, A_CALL);
+    C(a_return, A_RETURN);
 #undef C
-    CONST_ID(id, "a_call"); if (sym == ID2SYM(id)) return RUBY_EVENT_CALL | RUBY_EVENT_B_CALL | RUBY_EVENT_C_CALL;
-    CONST_ID(id, "a_return"); if (sym == ID2SYM(id)) return RUBY_EVENT_RETURN | RUBY_EVENT_B_RETURN | RUBY_EVENT_C_RETURN;
     rb_raise(rb_eArgError, "unknown event: %"PRIsVALUE, rb_sym2str(sym));
 }
 
@@ -1171,6 +1175,36 @@ tracepoint_new(VALUE klass, rb_thread_t *target_th, rb_event_flag_t events, void
     return tpval;
 }
 
+/*
+ * Creates a tracepoint by registering a callback function for one or more
+ * tracepoint events. Once the tracepoint is created, you can use
+ * rb_tracepoint_enable to enable the tracepoint.
+ *
+ * Parameters:
+ *   1. VALUE target_thval - Meant for picking the thread in which the tracepoint
+ *      is to be created. However, current implementation ignore this parameter,
+ *      tracepoint is created for all threads. Simply specify Qnil.
+ *   2. rb_event_flag_t events - Event(s) to listen to.
+ *   3. void (*func)(VALUE, void *) - A callback function.
+ *   4. void *data - Void pointer that will be passed to the callback function.
+ *
+ * When the callback function is called, it will be passed 2 parameters:
+ *   1)VALUE tpval - the TracePoint object from which trace args can be extracted.
+ *   2)void *data - A void pointer which helps to share scope with the callback function.
+ *
+ * It is important to note that you cannot register callbacks for normal events and internal events
+ * simultaneously because they are different purpose.
+ * You can use any Ruby APIs (calling methods and so on) on normal event hooks.
+ * However, in internal events, you can not use any Ruby APIs (even object creations).
+ * This is why we can't specify internal events by TracePoint directly.
+ * Limitations are MRI version specific.
+ *
+ * Example:
+ *   rb_tracepoint_new(Qnil, RUBY_INTERNAL_EVENT_NEWOBJ | RUBY_INTERNAL_EVENT_FREEOBJ, obj_event_i, data);
+ *
+ *   In this example, a callback function obj_event_i will be registered for
+ *   internal events RUBY_INTERNAL_EVENT_NEWOBJ and RUBY_INTERNAL_EVENT_FREEOBJ.
+ */
 VALUE
 rb_tracepoint_new(VALUE target_thval, rb_event_flag_t events, void (*func)(VALUE, void *), void *data)
 {
@@ -1282,7 +1316,7 @@ tracepoint_inspect(VALUE self)
 	    {
 		VALUE sym = rb_tracearg_method_id(trace_arg);
 		if (NIL_P(sym))
-		  goto default_inspect;
+		    goto default_inspect;
 		return rb_sprintf("#<TracePoint:%"PRIsVALUE"@%"PRIsVALUE":%d in `%"PRIsVALUE"'>",
 				  rb_tracearg_event(trace_arg),
 				  rb_tracearg_path(trace_arg),
@@ -1417,7 +1451,6 @@ Init_vm_trace(void)
      */
     rb_cTracePoint = rb_define_class("TracePoint", rb_cObject);
     rb_undef_alloc_func(rb_cTracePoint);
-    rb_undef_method(CLASS_OF(rb_cTracePoint), "new");
     rb_define_singleton_method(rb_cTracePoint, "new", tracepoint_new_s, -1);
     /*
      * Document-method: trace

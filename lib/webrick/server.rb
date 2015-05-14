@@ -131,7 +131,6 @@ module WEBrick
 
     def listen(address, port)
       @listeners += Utils::create_listeners(address, port)
-      setup_shutdown_pipe
     end
 
     ##
@@ -159,6 +158,8 @@ module WEBrick
       raise ServerError, "already started." if @status != :Stop
       server_type = @config[:ServerType] || SimpleServer
 
+      setup_shutdown_pipe
+
       server_type.start{
         @logger.info \
           "#{self.class}#start: pid=#{$$} port=#{@config[:Port]}"
@@ -178,7 +179,9 @@ module WEBrick
                 svrs[0].each{|svr|
                   @tokens.pop          # blocks while no token is there.
                   if sock = accept_client(svr)
-                    sock.do_not_reverse_lookup = config[:DoNotReverseLookup]
+                    unless config[:DoNotReverseLookup].nil?
+                      sock.do_not_reverse_lookup = !!config[:DoNotReverseLookup]
+                    end
                     th = start_thread(sock, &block)
                     th[:WEBrickThread] = true
                     thgroup.add(th)
@@ -330,6 +333,7 @@ module WEBrick
 
     def cleanup_shutdown_pipe(shutdown_pipe)
       @shutdown_pipe = nil
+      return if !shutdown_pipe
       shutdown_pipe.each {|io|
         if !io.closed?
           begin

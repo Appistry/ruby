@@ -661,7 +661,7 @@ class TestArray < Test::Unit::TestCase
 
     bug2545 = '[ruby-core:27366]'
     a = @cls[ 5, 6, 7, 8, 9, 10 ]
-    assert_equal(9, a.delete_if {|i| break i if i > 8; assert_equal(a[0], i) || true if i < 7})
+    assert_equal(9, a.delete_if {|i| break i if i > 8; i < 7})
     assert_equal(@cls[7, 8, 9, 10], a, bug2545)
   end
 
@@ -770,18 +770,37 @@ class TestArray < Test::Unit::TestCase
     assert_equal(@cls[], @cls[].flatten)
     assert_equal(@cls[],
                  @cls[@cls[@cls[@cls[],@cls[]],@cls[@cls[]],@cls[]],@cls[@cls[@cls[]]]].flatten)
+  end
 
+  def test_flatten_wrong_argument
     assert_raise(TypeError, "[ruby-dev:31197]") { [[]].flatten("") }
+  end
 
+  def test_flatten_taint
     a6 = @cls[[1, 2], 3]
     a6.taint
     a7 = a6.flatten
     assert_equal(true, a7.tainted?)
+  end
 
+  def test_flatten_level0
     a8 = @cls[[1, 2], 3]
     a9 = a8.flatten(0)
     assert_equal(a8, a9)
     assert_not_same(a8, a9)
+  end
+
+  def test_flatten_splat
+    bug10748 = '[ruby-core:67637] [Bug #10748]'
+    o = Object.new
+    o.singleton_class.class_eval do
+      define_method(:to_ary) do
+        raise bug10748
+      end
+    end
+    a = @cls[@cls[o]]
+    assert_raise_with_message(RuntimeError, bug10748) {a.flatten}
+    assert_nothing_raised(RuntimeError, bug10748) {a.flatten(1)}
   end
 
   def test_flatten!
@@ -796,12 +815,29 @@ class TestArray < Test::Unit::TestCase
     assert_equal(@cls[1, 2, 3, 4, 5, 6], a5.flatten!)
     assert_nil(a5.flatten!(0), '[ruby-core:23382]')
     assert_equal(@cls[1, 2, 3, 4, 5, 6], a5)
+  end
 
+  def test_flatten_empty!
     assert_nil(@cls[].flatten!)
     assert_equal(@cls[],
                  @cls[@cls[@cls[@cls[],@cls[]],@cls[@cls[]],@cls[]],@cls[@cls[@cls[]]]].flatten!)
+  end
 
+  def test_flatten_level0!
     assert_nil(@cls[].flatten!(0), '[ruby-core:23382]')
+  end
+
+  def test_flatten_splat!
+    bug10748 = '[ruby-core:67637] [Bug #10748]'
+    o = Object.new
+    o.singleton_class.class_eval do
+      define_method(:to_ary) do
+        raise bug10748
+      end
+    end
+    a = @cls[@cls[o]]
+    assert_raise_with_message(RuntimeError, bug10748) {a.flatten!}
+    assert_nothing_raised(RuntimeError, bug10748) {a.flatten!(1)}
   end
 
   def test_flatten_with_callcc
@@ -1160,7 +1196,7 @@ class TestArray < Test::Unit::TestCase
 
     bug2545 = '[ruby-core:27366]'
     a = @cls[ 5, 6, 7, 8, 9, 10 ]
-    assert_equal(9, a.reject! {|i| break i if i > 8; assert_equal(a[0], i) || true if i < 7})
+    assert_equal(9, a.reject! {|i| break i if i > 8; i < 7})
     assert_equal(@cls[7, 8, 9, 10], a, bug2545)
   end
 
@@ -2019,6 +2055,16 @@ class TestArray < Test::Unit::TestCase
     a = @cls[ 1, 2, 3, 4, 5 ]
     assert_equal(a, a.select! { |i| i > 3 })
     assert_equal(@cls[4, 5], a)
+
+    bug10722 = '[ruby-dev:48805] [Bug #10722]'
+    a = @cls[ 5, 6, 7, 8, 9, 10 ]
+    r = a.select! {|i|
+      break i if i > 8
+      # assert_equal(a[0], i, "should be selected values only") if i == 7
+      i >= 7
+    }
+    assert_equal(9, r)
+    assert_equal(@cls[7, 8, 9, 10], a, bug10722)
   end
 
   def test_delete2
@@ -2447,6 +2493,10 @@ class TestArray < Test::Unit::TestCase
   def test_bsearch_typechecks_return_values
     assert_raise(TypeError) do
       [1, 2, 42, 100, 666].bsearch{ "not ok" }
+    end
+    c = eval("class C\u{309a 26a1 26c4 1f300};self;end")
+    assert_raise_with_message(TypeError, /C\u{309a 26a1 26c4 1f300}/) do
+      [0,1].bsearch {c.new}
     end
     assert_equal [1, 2, 42, 100, 666].bsearch{}, [1, 2, 42, 100, 666].bsearch{false}
   end

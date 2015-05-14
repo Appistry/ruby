@@ -328,7 +328,7 @@ rb_obj_clone(VALUE obj)
         rb_raise(rb_eTypeError, "can't clone %s", rb_obj_classname(obj));
     }
     clone = rb_obj_alloc(rb_obj_class(obj));
-    RBASIC(clone)->flags &= (FL_TAINT);
+    RBASIC(clone)->flags &= (FL_TAINT|FL_PROMOTED0|FL_PROMOTED1);
     RBASIC(clone)->flags |= RBASIC(obj)->flags & ~(FL_PROMOTED0|FL_PROMOTED1|FL_FREEZE|FL_FINALIZE);
 
     singleton = rb_singleton_class_clone_and_attach(obj, clone);
@@ -471,7 +471,7 @@ rb_any_to_s(VALUE obj)
 VALUE
 rb_inspect(VALUE obj)
 {
-    VALUE str = rb_obj_as_string(rb_funcall(obj, id_inspect, 0, 0));
+    VALUE str = rb_obj_as_string(rb_funcallv(obj, id_inspect, 0, 0));
     rb_encoding *ext = rb_default_external_encoding();
     if (!rb_enc_asciicompat(ext)) {
 	if (!rb_enc_str_asciionly_p(str))
@@ -651,7 +651,7 @@ static VALUE
 class_search_ancestor(VALUE cl, VALUE c)
 {
     while (cl) {
-	if (cl == c || RCLASS_M_TBL_WRAPPER(cl) == RCLASS_M_TBL_WRAPPER(c))
+	if (cl == c || RCLASS_M_TBL(cl) == RCLASS_M_TBL(c))
 	    return cl;
 	cl = RCLASS_SUPER(cl);
     }

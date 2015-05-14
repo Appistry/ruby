@@ -536,6 +536,90 @@ class TestProcess < Test::Unit::TestCase
     }
   end
 
+  def test_execopts_redirect_open_order_normal
+    minfd = 3
+    maxfd = 20
+    with_tmpchdir {|d|
+      opts = {}
+      minfd.upto(maxfd) {|fd| opts[fd] = ["out#{fd}", "w"] }
+      system RUBY, "-e", "#{minfd}.upto(#{maxfd}) {|fd| IO.new(fd).print fd.to_s }", opts
+      minfd.upto(maxfd) {|fd| assert_equal(fd.to_s, File.read("out#{fd}")) }
+    }
+  end unless windows? # passing non-stdio fds is not supported on Windows
+
+  def test_execopts_redirect_open_order_reverse
+    minfd = 3
+    maxfd = 20
+    with_tmpchdir {|d|
+      opts = {}
+      maxfd.downto(minfd) {|fd| opts[fd] = ["out#{fd}", "w"] }
+      system RUBY, "-e", "#{minfd}.upto(#{maxfd}) {|fd| IO.new(fd).print fd.to_s }", opts
+      minfd.upto(maxfd) {|fd| assert_equal(fd.to_s, File.read("out#{fd}")) }
+    }
+  end unless windows? # passing non-stdio fds is not supported on Windows
+
+  def test_execopts_redirect_open_fifo
+    with_tmpchdir {|d|
+      begin
+        File.mkfifo("fifo")
+      rescue NotImplementedError
+        return
+      end
+      assert(FileTest.pipe?("fifo"), "should be pipe")
+      t1 = Thread.new {
+        system(*ECHO["output to fifo"], :out=>"fifo")
+      }
+      t2 = Thread.new {
+        IO.popen([*CAT, :in=>"fifo"]) {|f| f.read }
+      }
+      v1, v2 = assert_join_threads([t1, t2])
+      assert_equal("output to fifo\n", v2)
+    }
+  end unless windows? # does not support fifo
+
+  def test_execopts_redirect_open_fifo_interrupt_raise
+    with_tmpchdir {|d|
+      begin
+        File.mkfifo("fifo")
+      rescue NotImplementedError
+        return
+      end
+      IO.popen([RUBY, '-e', <<-'EOS']) {|io|
+        class E < StandardError; end
+        trap(:USR1) { raise E }
+        begin
+          system("cat", :in => "fifo")
+        rescue E
+          puts "ok"
+        end
+      EOS
+        sleep 0.5
+        Process.kill(:USR1, io.pid)
+        assert_equal("ok\n", io.read)
+      }
+    }
+  end unless windows? # does not support fifo
+
+  def test_execopts_redirect_open_fifo_interrupt_print
+    with_tmpchdir {|d|
+      begin
+        File.mkfifo("fifo")
+      rescue NotImplementedError
+        return
+      end
+      IO.popen([RUBY, '-e', <<-'EOS']) {|io|
+        trap(:USR1) { print "trap\n" }
+        system("cat", :in => "fifo")
+      EOS
+        sleep 0.5
+        Process.kill(:USR1, io.pid)
+        sleep 0.1
+        File.write("fifo", "ok\n")
+        assert_equal("trap\nok\n", io.read)
+      }
+    }
+  end unless windows? # does not support fifo
+
   def test_execopts_redirect_pipe
     with_pipe {|r1, w1|
       with_pipe {|r2, w2|
@@ -1248,26 +1332,12 @@ class TestProcess < Test::Unit::TestCase
     return unless Signal.list.include?("QUIT")
 
     with_tmpchdir do
-      write_file("foo", "puts;STDOUT.flush;sleep 30")
-      pid = nil
-      IO.pipe do |r, w|
-        pid = spawn(RUBY, "foo", out: w)
-        w.close
-        th = Thread.new { r.read(1); Process.kill(:SIGQUIT, pid) }
-        Process.wait(pid)
-        th.join
-      end
-      t = Time.now
-      s = $?
+      s = assert_in_out_err([], "Process.kill(:SIGQUIT, $$);sleep 30", //, //)
       assert_equal([false, true, false, nil],
                    [s.exited?, s.signaled?, s.stopped?, s.success?],
                    "[s.exited?, s.signaled?, s.stopped?, s.success?]")
-      assert_send(
-        [["#<Process::Status: pid #{ s.pid } SIGQUIT (signal #{ s.termsig })>",
-          "#<Process::Status: pid #{ s.pid } SIGQUIT (signal #{ s.termsig }) (core dumped)>"],
-         :include?,
-         s.inspect])
-      EnvUtil.diagnostic_reports("QUIT", RUBY, pid, t)
+      assert_equal("#<Process::Status: pid #{ s.pid } SIGQUIT (signal #{ s.termsig })>",
+                   s.inspect.sub(/ \(core dumped\)(?=>\z)/, ''))
     end
   end
 
@@ -1924,68 +1994,18 @@ EOS
   end
 
   def test_deadlock_by_signal_at_forking
-    assert_separately([], <<-INPUT, timeout: 60)
-      require 'io/wait'
-      begin
-        GC.start # reduce garbage
-        buf = ''
-        ruby = EnvUtil.rubybin
-        er, ew = IO.pipe
-        unless runner = IO.popen("-".freeze)
-          er.close
-          status = true
-          GC.disable # avoid triggering CoW after forks
-          begin
-            $stderr.reopen($stdout)
-            trap(:QUIT) {}
-            parent = $$
-            100.times do |i|
-              pid = fork {Process.kill(:QUIT, parent)}
-              IO.popen(ruby, 'r+'.freeze){}
-              Process.wait(pid)
-              $stdout.puts
-              $stdout.flush
-            end
-          ensure
-            if $!
-              ew.puts([Marshal.dump($!)].pack("m0"))
-              status = false
-            end
-            ew.close
-            exit!(status)
-          end
-        end
-        ew.close
-        begin
-          loop do
-            runner.wait_readable(5)
-            runner.read_nonblock(100, buf)
-          end
-        rescue EOFError => e
-          _, status = Process.wait2(runner.pid)
-        rescue IO::WaitReadable => e
-          Process.kill(:INT, runner.pid)
-          exc = Marshal.load(er.read.unpack("m")[0])
-          if exc.kind_of? Interrupt
-            # Don't raise Interrupt.  It aborts test-all.
-            flunk "timeout"
-          else
-            raise exc
-          end
-        end
-        assert_predicate(status, :success?)
-      ensure
-        er.close unless er.closed?
-        ew.close unless ew.closed?
-        if runner
-          begin
-            Process.kill(:TERM, runner.pid)
-            sleep 1
-            Process.kill(:KILL, runner.pid)
-          rescue Errno::ESRCH
-          end
-          runner.close
-        end
+    assert_separately(["-", EnvUtil.rubybin], <<-INPUT, timeout: 60)
+      ruby = ARGV.shift
+      GC.start # reduce garbage
+      GC.disable # avoid triggering CoW after forks
+      trap(:QUIT) {}
+      parent = $$
+      100.times do |i|
+        pid = fork {Process.kill(:QUIT, parent)}
+        IO.popen(ruby, 'r+'){}
+        Process.wait(pid)
+        $stdout.puts
+        $stdout.flush
       end
     INPUT
   end if defined?(fork)

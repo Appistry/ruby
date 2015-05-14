@@ -350,7 +350,14 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 
     /* convert char * to wchar_t */
     if (!NIL_P(path)) {
-	wpath = mbstr_to_wstr(cp, RSTRING_PTR(path), (int)RSTRING_LEN(path), &wpath_len);
+	const long path_len = RSTRING_LEN(path);
+#if SIZEOF_INT < SIZEOF_LONG
+	if ((long)(int)path_len != path_len) {
+	    rb_raise(rb_eRangeError, "path (%ld bytes) is too long",
+		     path_len);
+	}
+#endif
+	wpath = mbstr_to_wstr(cp, RSTRING_PTR(path), path_len, &wpath_len);
 	wpath_pos = wpath;
     }
 
@@ -401,6 +408,8 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 	else {
 	    /* determine if we ignore dir or not later */
 	    path_drive = wpath_pos[0];
+	    wpath_pos += 2;
+	    wpath_len -= 2;
 	}
     }
     else if (abs_mode == 0 && wpath_len >= 2 && wpath_pos[0] == L'~') {
@@ -423,7 +432,15 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 
 	/* convert char * to wchar_t */
 	if (!NIL_P(dir)) {
-	    wdir = mbstr_to_wstr(cp, RSTRING_PTR(dir), (int)RSTRING_LEN(dir), &wdir_len);
+	    const long dir_len = RSTRING_LEN(dir);
+#if SIZEOF_INT < SIZEOF_LONG
+	    if ((long)(int)dir_len != dir_len) {
+		if (wpath) xfree(wpath);
+		rb_raise(rb_eRangeError, "base directory (%ld bytes) is too long",
+			 dir_len);
+	    }
+#endif
+	    wdir = mbstr_to_wstr(cp, RSTRING_PTR(dir), dir_len, &wdir_len);
 	    wdir_pos = wdir;
 	}
 
@@ -495,15 +512,11 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 
     /* determine if we ignore dir or not */
     if (!ignore_dir && path_drive && dir_drive) {
-	if (towupper(path_drive) == towupper(dir_drive)) {
-	    /* exclude path drive letter to use dir */
-	    wpath_pos += 2;
-	    wpath_len -= 2;
-	}
-	else {
+	if (towupper(path_drive) != towupper(dir_drive)) {
 	    /* ignore dir since path drive is different from dir drive */
 	    ignore_dir = 1;
 	    wdir_len = 0;
+	    dir_drive = 0;
 	}
     }
 
@@ -533,6 +546,10 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
     if (whome_len && wcsrchr(L"\\/:", buffer_pos[-1]) == NULL) {
 	buffer_pos[0] = L'\\';
 	buffer_pos++;
+    }
+    else if (!dir_drive && path_drive) {
+	*buffer_pos++ = path_drive;
+	*buffer_pos++ = L':';
     }
 
     if (wdir_len) {
@@ -634,6 +651,36 @@ rb_file_expand_path_internal(VALUE fname, VALUE dname, int abs_mode, int long_na
 
     rb_enc_associate(result, path_encoding);
     return result;
+}
+
+ssize_t rb_w32_wreadlink(const WCHAR *path, WCHAR *buf, size_t bufsize);
+
+VALUE
+rb_readlink(VALUE path)
+{
+    ssize_t len;
+    WCHAR *wpath, wbuf[MAX_PATH];
+    rb_encoding *enc;
+    UINT cp, path_cp;
+
+    rb_secure(2);
+    FilePathValue(path);
+    enc = rb_enc_get(path);
+    cp = path_cp = code_page(enc);
+    if (cp == INVALID_CODE_PAGE) {
+	path = fix_string_encoding(path, enc);
+	cp = CP_UTF8;
+    }
+    wpath = mbstr_to_wstr(cp, RSTRING_PTR(path),
+			  RSTRING_LEN(path)+rb_enc_mbminlen(enc), NULL);
+    if (!wpath) rb_memerror();
+    len = rb_w32_wreadlink(wpath, wbuf, numberof(wbuf));
+    free(wpath);
+    if (len < 0) rb_sys_fail_path(path);
+    enc = rb_filesystem_encoding();
+    cp = path_cp = code_page(enc);
+    if (cp == INVALID_CODE_PAGE) cp = CP_UTF8;
+    return append_wstr(rb_enc_str_new(0, 0, enc), wbuf, len, cp, path_cp, enc);
 }
 
 int

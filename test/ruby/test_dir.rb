@@ -126,6 +126,7 @@ class TestDir < Test::Unit::TestCase
   def test_close
     d = Dir.open(@root)
     d.close
+    assert_nothing_raised(IOError) { d.close }
     assert_raise(IOError) { d.read }
   end
 
@@ -177,8 +178,17 @@ class TestDir < Test::Unit::TestCase
     end
   end
 
+  def assert_entries(entries)
+    entries.sort!
+    assert_equal(%w(. ..) + (?a..?z).to_a, entries)
+  end
+
+  def test_entries
+    assert_entries(Dir.open(@root) {|dir| dir.entries})
+  end
+
   def test_foreach
-    assert_equal(Dir.foreach(@root).to_a.sort, %w(. ..) + (?a..?z).to_a)
+    assert_entries(Dir.foreach(@root).to_a)
   end
 
   def test_dir_enc
@@ -221,7 +231,8 @@ class TestDir < Test::Unit::TestCase
     assert_equal([*?a..?z, *"symlink-a".."symlink-z"].each_slice(2).map {|f, _| File.join(@root, f + "/") }.sort,
 		 Dir.glob(File.join(@root, "*/")).sort)
 
-    Dir.glob(File.join(@root, "**/"))
+    assert_equal([@root + "/", *[*?a..?z].each_slice(2).map {|f, _| File.join(@root, f + "/") }.sort],
+                 Dir.glob(File.join(@root, "**/")).sort)
   end
 
   def test_glob_metachar
@@ -246,6 +257,22 @@ class TestDir < Test::Unit::TestCase
     bug9648 = '[ruby-core:61552] [Bug #9648]'
     roots = Dir.glob("/*")
     assert_equal(roots.map {|n| "/..#{n}"}, Dir.glob("/../*"), bug9648)
+  end
+
+  if /mswin|mingw/ =~ RUBY_PLATFORM
+    def test_glob_legacy_short_name
+      bug10819 = '[ruby-core:67954] [Bug #10819]'
+      skip unless /\A\w:/ =~ ENV["ProgramFiles"]
+      short = "#$&/PROGRA~1"
+      skip unless File.directory?(short)
+      entries = Dir.glob("#{short}/Common*")
+      assert_not_empty(entries, bug10819)
+      long = File.expand_path(short)
+      assert_equal(Dir.glob("#{long}/Common*"), entries, bug10819)
+      wild = short.sub(/1\z/, '*')
+      assert_include(Dir.glob(wild), long, bug10819)
+      assert_empty(entries - Dir.glob("#{wild}/Common*"), bug10819)
+    end
   end
 
   def test_home

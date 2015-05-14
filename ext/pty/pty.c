@@ -182,7 +182,7 @@ establishShell(int argc, VALUE *argv, struct pty_info *info,
 
     carg.execarg_obj = rb_execarg_new(argc, argv, 1);
     carg.eargp = rb_execarg_get(carg.execarg_obj);
-    rb_execarg_fixup(carg.execarg_obj);
+    rb_execarg_parent_start(carg.execarg_obj);
 
     getDevice(&master, &slave, SlaveName, 0);
 
@@ -196,12 +196,14 @@ establishShell(int argc, VALUE *argv, struct pty_info *info,
 	int e = errno;
 	close(master);
 	close(slave);
+        rb_execarg_parent_end(carg.execarg_obj);
 	errno = e;
 	if (status) rb_jump_tag(status);
 	rb_sys_fail(errbuf[0] ? errbuf : "fork failed");
     }
 
     close(slave);
+    rb_execarg_parent_end(carg.execarg_obj);
 
     info->child_pid = pid;
     info->fd = master;
@@ -261,7 +263,7 @@ get_device_once(int *master, int *slave, char SlaveName[DEVICELEN], int nomesg, 
     if ((slavefd = rb_cloexec_open(slavedevice, O_RDWR|O_NOCTTY, 0)) == -1) goto error;
     rb_update_max_fd(slavefd);
 
-#if defined(I_PUSH) && !defined(__linux__)
+#if defined(I_PUSH) && !defined(__linux__) && !defined(_AIX)
     if (ioctl(slavefd, I_PUSH, "ptem") == -1) goto error;
     if (ioctl(slavefd, I_PUSH, "ldterm") == -1) goto error;
     if (ioctl(slavefd, I_PUSH, "ttcompat") == -1) goto error;
@@ -345,7 +347,7 @@ get_device_once(int *master, int *slave, char SlaveName[DEVICELEN], int nomesg, 
     if (no_mesg(slavedevice, nomesg) == -1) goto error;
     if((slavefd = rb_cloexec_open(slavedevice, O_RDWR, 0)) == -1) goto error;
     rb_update_max_fd(slavefd);
-#if defined(I_PUSH) && !defined(__linux__)
+#if defined(I_PUSH) && !defined(__linux__) && !defined(_AIX)
     if(ioctl(slavefd, I_PUSH, "ptem") == -1) goto error;
     if(ioctl(slavefd, I_PUSH, "ldterm") == -1) goto error;
     ioctl(slavefd, I_PUSH, "ttcompat");
@@ -502,6 +504,14 @@ pty_close_pty(VALUE assoc)
  * +master_io+::    the master of the pty, as an IO.
  * +slave_file+::   the slave of the pty, as a File.  The path to the
  *		    terminal device is available via +slave_file.path+
+ *
+ * IO#raw! is usable to disable newline conversions:
+ *
+ *   require 'io/console'
+ *   PTY.open {|m, s|
+ *     s.raw!
+ *     ...
+ *   }
  *
  */
 static VALUE

@@ -1713,6 +1713,7 @@ end
 # * #norm
 # * #normalize
 # * #r
+# * #round
 # * #size
 #
 # Conversion to other data types:
@@ -1789,6 +1790,13 @@ class Vector
   alias set_element []=
   alias set_component []=
   private :[]=, :set_element, :set_component
+
+  # Returns a vector with entries rounded to the given precision
+  # (see Float#round)
+  #
+  def round(ndigits=0)
+    map{|e| e.round(ndigits)}
+  end
 
   #
   # Returns the number of elements in the vector.
@@ -1907,7 +1915,7 @@ class Vector
   #++
 
   #
-  # Multiplies the vector by +x+, where +x+ is a number or another vector.
+  # Multiplies the vector by +x+, where +x+ is a number or a matrix.
   #
   def *(x)
     case x

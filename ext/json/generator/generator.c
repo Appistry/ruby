@@ -515,7 +515,7 @@ static size_t State_memsize(const void *ptr)
     return size;
 }
 
-#ifdef HAVE_TYPE_RB_DATA_TYPE_T
+#ifdef NEW_TYPEDDATA_WRAPPER
 static const rb_data_type_t JSON_Generator_State_type = {
     "JSON/Generator/State",
     {NULL, State_free, State_memsize,},
@@ -535,11 +535,7 @@ static JSON_Generator_State *State_allocate(void)
 static VALUE cState_s_allocate(VALUE klass)
 {
     JSON_Generator_State *state = State_allocate();
-#ifdef HAVE_TYPE_RB_DATA_TYPE_T
     return TypedData_Wrap_Struct(klass, &JSON_Generator_State_type, state);
-#else
-    return Data_Wrap_Struct(klass, NULL, State_free, state);
-#endif
 }
 
 /*
@@ -880,7 +876,7 @@ static void generate_json(FBuffer *buffer, VALUE Vstate, JSON_Generator_State *s
     } else {
         tmp = rb_funcall(obj, i_to_s, 0);
         Check_Type(tmp, T_STRING);
-        generate_json(buffer, Vstate, state, tmp);
+        generate_json_string(buffer, Vstate, state, tmp);
     }
 }
 
@@ -901,6 +897,7 @@ static FBuffer *cState_prepare_buffer(VALUE self)
     } else {
         state->object_delim2 = fbuffer_alloc(16);
     }
+    if (state->space_before) fbuffer_append(state->object_delim2, state->space_before, state->space_before_len);
     fbuffer_append_char(state->object_delim2, ':');
     if (state->space) fbuffer_append(state->object_delim2, state->space, state->space_len);
 

@@ -383,6 +383,8 @@ class Gem::Specification < Gem::BasicSpecification
   attr_reader :description
 
   ##
+  # :category: Recommended gemspec attributes
+  #
   # A contact email address (or addresses) for this gem
   #
   # Usage:
@@ -393,11 +395,13 @@ class Gem::Specification < Gem::BasicSpecification
   attr_accessor :email
 
   ##
+  # :category: Recommended gemspec attributes
+  #
   # The URL of this gem's home page
   #
   # Usage:
   #
-  #   spec.homepage = 'http://rake.rubyforge.org'
+  #   spec.homepage = 'https://github.com/ruby/rake'
 
   attr_accessor :homepage
 
@@ -1028,8 +1032,8 @@ class Gem::Specification < Gem::BasicSpecification
     file = file.dup.untaint
     return unless File.file?(file)
 
-    spec = LOAD_CACHE[file]
-    return spec if spec
+    _spec = LOAD_CACHE[file]
+    return _spec if _spec
 
     code = if defined? Encoding
              File.read file, :mode => 'r:UTF-8:-'
@@ -1040,15 +1044,15 @@ class Gem::Specification < Gem::BasicSpecification
     code.untaint
 
     begin
-      spec = eval code, binding, file
+      _spec = eval code, binding, file
 
-      if Gem::Specification === spec
-        spec.loaded_from = File.expand_path file.to_s
-        LOAD_CACHE[file] = spec
-        return spec
+      if Gem::Specification === _spec
+        _spec.loaded_from = File.expand_path file.to_s
+        LOAD_CACHE[file] = _spec
+        return _spec
       end
 
-      warn "[#{file}] isn't a Gem::Specification (#{spec.class} instead)."
+      warn "[#{file}] isn't a Gem::Specification (#{_spec.class} instead)."
     rescue SignalException, SystemExit
       raise
     rescue SyntaxError, Exception => e
@@ -1322,6 +1326,50 @@ class Gem::Specification < Gem::BasicSpecification
   end
 
   ##
+  # Abbreviate the spec for downloading.  Abbreviated specs are only used for
+  # searching, downloading and related activities and do not need deployment
+  # specific information (e.g. list of files).  So we abbreviate the spec,
+  # making it much smaller for quicker downloads.
+
+  def abbreviate
+    self.files = []
+    self.test_files = []
+    self.rdoc_options = []
+    self.extra_rdoc_files = []
+    self.cert_chain = []
+  end
+
+  ##
+  # Sanitize the descriptive fields in the spec.  Sometimes non-ASCII
+  # characters will garble the site index.  Non-ASCII characters will
+  # be replaced by their XML entity equivalent.
+
+  def sanitize
+    self.summary              = sanitize_string(summary)
+    self.description          = sanitize_string(description)
+    self.post_install_message = sanitize_string(post_install_message)
+    self.authors              = authors.collect { |a| sanitize_string(a) }
+  end
+
+  ##
+  # Sanitize a single string.
+
+  def sanitize_string(string)
+    return string unless string
+
+    # HACK the #to_s is in here because RSpec has an Array of Arrays of
+    # Strings for authors.  Need a way to disallow bad values on gemspec
+    # generation.  (Probably won't happen.)
+    string = string.to_s
+
+    begin
+      Builder::XChar.encode string
+    rescue NameError, NoMethodError
+      string.to_xs
+    end
+  end
+
+  ##
   # Returns an array with bindir attached to each executable in the
   # +executables+ list
 
@@ -1350,7 +1398,7 @@ class Gem::Specification < Gem::BasicSpecification
                    end
 
     unless dependency.respond_to?(:name) &&
-           dependency.respond_to?(:version_requirements)
+           dependency.respond_to?(:requirement)
       dependency = Gem::Dependency.new(dependency.to_s, requirements, type)
     end
 
@@ -1932,7 +1980,7 @@ class Gem::Specification < Gem::BasicSpecification
   # Singular accessor for #licenses
 
   def license
-    val = licenses and val.first
+    licenses.first
   end
 
   ##
@@ -2609,7 +2657,7 @@ http://opensource.org/licenses/alphabetical
 
     # Warnings
 
-    %w[author description email homepage summary].each do |attribute|
+    %w[author email homepage summary].each do |attribute|
       value = self.send attribute
       warning "no #{attribute} specified" if value.nil? or value.empty?
     end

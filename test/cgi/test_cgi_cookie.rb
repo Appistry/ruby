@@ -1,21 +1,25 @@
 require 'test/unit'
 require 'cgi'
 require 'stringio'
+require_relative 'update_env'
 
 
 class CGICookieTest < Test::Unit::TestCase
+  include UpdateEnv
 
 
   def setup
-    ENV['REQUEST_METHOD'] = 'GET'
+    @environ = {}
+    update_env(
+      'REQUEST_METHOD' => 'GET',
+      'SCRIPT_NAME' => nil,
+    )
     @str1="\xE3\x82\x86\xE3\x82\x93\xE3\x82\x86\xE3\x82\x93"
     @str1.force_encoding("UTF-8") if defined?(::Encoding)
   end
 
   def teardown
-    %W[REQUEST_METHOD SCRIPT_NAME].each do |name|
-      ENV.delete(name)
-    end
+    ENV.update(@environ)
   end
 
 
@@ -40,7 +44,7 @@ class CGICookieTest < Test::Unit::TestCase
                              'path'=>'/cgi-bin/myapp/',
                              'domain'=>'www.example.com',
                              'expires'=>t,
-                             'secure'=>true
+                             'secure'=>true,
                              )
     assert_equal('name1', cookie.name)
     assert_equal(value, cookie.value)

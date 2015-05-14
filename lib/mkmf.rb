@@ -387,8 +387,9 @@ module MakeMakefile
       if opts and opts[:werror]
         result = nil
         Logging.postpone do |log|
-          result = (system(libpath_env, command) and File.zero?(log.path))
-          ""
+          output = IO.popen(libpath_env, command, &:read)
+          result = ($?.success? and File.zero?(log.path))
+          output
         end
         result
       else
@@ -568,7 +569,7 @@ MSG
   # [+src+] a String which contains a C source
   # [+opt+] a String which contains compiler options
   def try_compile(src, opt="", *opts, &b)
-    with_werror(opt, *opts) {|_opt, *_opts| try_do(src, cc_command(_opt), *_opts, &b)} and
+    with_werror(opt, *opts) {|_opt, *| try_do(src, cc_command(_opt), *opts, &b)} and
       File.file?("#{CONFTEST}.#{$OBJEXT}")
   ensure
     MakeMakefile.rm_f "#{CONFTEST}*"
@@ -609,9 +610,17 @@ MSG
     $CPPFLAGS = cppflags unless ret
   end
 
-  def try_cppflags(flags)
-    with_cppflags(flags) do
-      try_header("int main() {return 0;}")
+  def try_cppflags(flags, opts = {})
+    try_header(MAIN_DOES_NOTHING, flags, {:werror => true}.update(opts))
+  end
+
+  def append_cppflags(flags, *opts)
+    Array(flags).each do |flag|
+      if checking_for("whether #{flag} is accepted as CPPFLAGS") {
+           try_cppflags(flag, *opts)
+         }
+        $CPPFLAGS << " " << flag
+      end
     end
   end
 
@@ -623,9 +632,17 @@ MSG
     $CFLAGS = cflags unless ret
   end
 
-  def try_cflags(flags)
-    with_cflags(flags) do
-      try_compile("int main() {return 0;}")
+  def try_cflags(flags, opts = {})
+    try_compile(MAIN_DOES_NOTHING, flags, {:werror => true}.update(opts))
+  end
+
+  def append_cflags(flags, *opts)
+    Array(flags).each do |flag|
+      if checking_for("whether #{flag} is accepted as CFLAGS") {
+           try_cflags(flag, *opts)
+         }
+        $CFLAGS << " " << flag
+      end
     end
   end
 
@@ -637,9 +654,17 @@ MSG
     $LDFLAGS = ldflags unless ret
   end
 
-  def try_ldflags(flags)
-    with_ldflags(flags) do
-      try_link("int main() {return 0;}")
+  def try_ldflags(flags, opts = {})
+    try_link(MAIN_DOES_NOTHING, flags, {:werror => true}.update(opts))
+  end
+
+  def append_ldflags(flags, *opts)
+    Array(flags).each do |flag|
+      if checking_for("whether #{flag} is accepted as LDFLAGS") {
+           try_ldflags(flag, *opts)
+         }
+        $LDFLAGS << " " << flag
+      end
     end
   end
 
@@ -1890,7 +1915,7 @@ VPATH = #{vpath.join(CONFIG['PATH_SEPARATOR'])}
       next if /^abs_/ =~ key
       next if /^(?:src|top|hdr)dir$/ =~ key
       next unless /dir$/ =~ key
-      mk << "#{key} = #{with_destdir(var)}\n"
+      mk << "#{key} = #{/^(?:top_src|build)dir$/ =~ key ? var : with_destdir(var)}\n"
     end
     if !$extmk and !$configure_args.has_key?('--ruby') and
         sep = config_string('BUILD_FILE_SEPARATOR')
@@ -1928,6 +1953,7 @@ COUTFLAG = #{COUTFLAG}$(empty)
 
 RUBY_EXTCONF_H = #{$extconf_h}
 cflags   = #{CONFIG['cflags']}
+cxxflags = #{CONFIG['cxxflags']}
 optflags = #{CONFIG['optflags']}
 debugflags = #{CONFIG['debugflags']}
 warnflags = #{$warnflags}

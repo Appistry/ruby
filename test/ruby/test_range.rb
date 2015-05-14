@@ -283,6 +283,14 @@ class TestRange < Test::Unit::TestCase
     assert_not_operator(0..10, :===, 11)
   end
 
+  def test_eqq_time
+    bug11113 = '[ruby-core:69052] [Bug #11113]'
+    t = Time.now
+    assert_nothing_raised(TypeError, bug11113) {
+      assert_operator(t..(t+10), :===, t+5)
+    }
+  end
+
   def test_include
     assert_include("a".."z", "c")
     assert_not_include("a".."z", "5")
@@ -377,6 +385,10 @@ class TestRange < Test::Unit::TestCase
   def test_bsearch_typechecks_return_values
     assert_raise(TypeError) do
       (1..42).bsearch{ "not ok" }
+    end
+    c = eval("class C\u{309a 26a1 26c4 1f300};self;end")
+    assert_raise_with_message(TypeError, /C\u{309a 26a1 26c4 1f300}/) do
+      (1..42).bsearch {c.new}
     end
     assert_equal (1..42).bsearch{}, (1..42).bsearch{false}
   end

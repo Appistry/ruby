@@ -1068,11 +1068,6 @@ rb_gc_mark_node(NODE *obj)
 	rb_gc_mark(RNODE(obj)->u2.value);
 	break;
 
-      case NODE_CREF:
-	rb_gc_mark(obj->nd_refinements);
-	rb_gc_mark(RNODE(obj)->nd_clss);
-	return (VALUE)RNODE(obj)->nd_next;
-
       default:		/* unlisted NODE */
 	rb_gc_mark_maybe(RNODE(obj)->u1.value);
 	rb_gc_mark_maybe(RNODE(obj)->u2.value);

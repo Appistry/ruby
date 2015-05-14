@@ -60,8 +60,6 @@ typedef enum {
     END_OF_ENUMERATION(VM_METHOD_TYPE)
 } rb_method_type_t;
 
-struct rb_call_info_struct;
-
 typedef struct rb_method_cfunc_struct {
     VALUE (*func)(ANYARGS);
     VALUE (*invoker)(VALUE (*func)(ANYARGS), VALUE recv, int argc, const VALUE *argv);
@@ -79,8 +77,12 @@ typedef struct rb_method_definition_struct {
     rb_method_type_t type; /* method type */
     int alias_count;
     ID original_id;
+
     union {
-	rb_iseq_t * const iseq;            /* should be mark */
+	struct {
+	    rb_iseq_t *const iseq;            /* should be mark */
+	    rb_cref_t *cref;
+	} iseq_body;
 	rb_method_cfunc_t cfunc;
 	rb_method_attr_t attr;
 	const VALUE proc;                 /* should be mark */
@@ -108,8 +110,12 @@ struct unlinked_method_entry_list_entry {
 };
 
 #define UNDEFINED_METHOD_ENTRY_P(me) (!(me) || !(me)->def || (me)->def->type == VM_METHOD_TYPE_UNDEF)
+#define UNDEFINED_REFINED_METHOD_P(def) \
+    ((def)->type == VM_METHOD_TYPE_REFINED && \
+     UNDEFINED_METHOD_ENTRY_P((def)->body.orig_me))
 
 void rb_add_method_cfunc(VALUE klass, ID mid, VALUE (*func)(ANYARGS), int argc, rb_method_flag_t noex);
+void rb_add_method_iseq(VALUE klass, ID mid, rb_iseq_t *iseq, rb_cref_t *cref, rb_method_flag_t noex);
 rb_method_entry_t *rb_add_method(VALUE klass, ID mid, rb_method_type_t type, void *option, rb_method_flag_t noex);
 rb_method_entry_t *rb_method_entry(VALUE klass, ID id, VALUE *define_class_ptr);
 rb_method_entry_t *rb_method_entry_at(VALUE obj, ID id);
@@ -136,6 +142,5 @@ VALUE rb_obj_method_location(VALUE obj, ID id);
 void rb_mark_method_entry(const rb_method_entry_t *me);
 void rb_free_method_entry(rb_method_entry_t *me);
 void rb_sweep_method_entry(void *vm);
-void rb_free_m_tbl_wrapper(struct method_table_wrapper *wrapper);
 
 #endif /* METHOD_H */

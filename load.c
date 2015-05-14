@@ -7,7 +7,6 @@
 #include "dln.h"
 #include "eval_intern.h"
 #include "probes.h"
-#include "node.h"
 
 VALUE ruby_dln_librefs;
 
@@ -600,7 +599,7 @@ rb_load_internal0(rb_thread_t *th, VALUE fname, int wrap)
     }
 
     mild_compile_error = th->mild_compile_error;
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     state = EXEC_TAG();
     if (state == 0) {
 	NODE *node;
@@ -613,7 +612,7 @@ rb_load_internal0(rb_thread_t *th, VALUE fname, int wrap)
 	th->mild_compile_error--;
 	rb_iseq_eval(iseq);
     }
-    POP_TAG();
+    TH_POP_TAG();
 
 #if !defined __GNUC__
     th = th0;
@@ -728,9 +727,9 @@ load_lock(const char *ftptr)
 	st_insert(loading_tbl, (st_data_t)ftptr, data);
 	return (char *)ftptr;
     }
-    else if (RB_TYPE_P((VALUE)data, T_NODE) && nd_type((VALUE)data) == NODE_MEMO) {
-	NODE *memo = RNODE(data);
-	void (*init)(void) = (void (*)(void))memo->nd_cfnc;
+    else if (RB_TYPE_P((VALUE)data, T_IMEMO) && imemo_type((VALUE)data) == imemo_memo) {
+	struct MEMO *memo = MEMO_CAST(data);
+	void (*init)(void) = (void (*)(void))memo->u3.func;
 	data = (st_data_t)rb_thread_shield_new();
 	st_insert(loading_tbl, (st_data_t)ftptr, data);
 	(*init)();
@@ -965,7 +964,7 @@ rb_require_internal(VALUE fname, int safe)
 				  rb_sourceline());
     }
 
-    PUSH_TAG();
+    TH_PUSH_TAG(th);
     saved.safe = rb_safe_level();
     if ((state = EXEC_TAG()) == 0) {
 	VALUE path;
@@ -1015,7 +1014,7 @@ rb_require_internal(VALUE fname, int safe)
 	    }
 	}
     }
-    POP_TAG();
+    TH_POP_TAG();
     load_unlock(ftptr, !state);
 
     rb_set_safe_level_force(saved.safe);
@@ -1078,7 +1077,7 @@ register_init_ext(st_data_t *key, st_data_t *value, st_data_t init, int existing
 	rb_warn("%s is already registered", name);
     }
     else {
-	*value = (st_data_t)NEW_MEMO(init, 0, 0);
+	*value = (st_data_t)MEMO_NEW(0, 0, init);
 	*key = (st_data_t)ruby_strdup(name);
     }
     return ST_CONTINUE;

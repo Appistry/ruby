@@ -843,40 +843,49 @@ module Test
 
         def exclude_from(klass)
           excludes = self.excludes
+          pattern = excludes.keys.grep(Regexp).tap {|k|
+            break (Regexp.new(k.join('|')) unless k.empty?)
+          }
           klass.class_eval do
             public_instance_methods(false).each do |method|
-              if excludes[method]
+              if excludes[method] or (pattern and pattern =~ method)
                 remove_method(method)
               end
             end
             public_instance_methods(true).each do |method|
-              if excludes[method]
+              if excludes[method] or (pattern and pattern =~ method)
                 undef_method(method)
               end
             end
           end
         end
 
-        def self.load(dir, name)
-          return unless dir and name
-          path = File.join(dir, name.gsub(/::/, '/') + ".rb")
-          begin
-            src = File.read(path)
-          rescue Errno::ENOENT
-            nil
-          else
-            instance = new({})
-            instance.instance_eval(src)
-            instance
+        def self.load(dirs, name)
+          return unless dirs and name
+          instance = nil
+          dirs.each do |dir|
+            path = File.join(dir, name.gsub(/::/, '/') + ".rb")
+            begin
+              src = File.read(path)
+            rescue Errno::ENOENT
+              nil
+            else
+              instance ||= new({})
+              instance.instance_eval(src)
+            end
           end
+          instance
         end
       end
 
       def setup_options(parser, options)
         super
-        options[:excludes] = ENV["EXCLUDES"]
+        if excludes = ENV["EXCLUDES"]
+          excludes = excludes.split(File::PATH_SEPARATOR)
+        end
+        options[:excludes] = excludes || []
         parser.on '-X', '--excludes-dir DIRECTORY', "Directory name of exclude files" do |d|
-          options[:excludes] = d
+          options[:excludes].concat d.split(File::PATH_SEPARATOR)
         end
       end
 

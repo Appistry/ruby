@@ -853,6 +853,20 @@ module Net
       copy_internal("UID COPY", set, mailbox)
     end
 
+    # Sends a MOVE command to move the specified message(s) to the end
+    # of the specified destination +mailbox+. The +set+ parameter is
+    # a number, an array of numbers, or a Range object. The number is
+    # a message sequence number.
+    # The IMAP MOVE extension is described in [RFC-6851].
+    def move(set, mailbox)
+      copy_internal("MOVE", set, mailbox)
+    end
+
+    # Similar to #move(), but +set+ contains unique identifiers.
+    def uid_move(set, mailbox)
+      copy_internal("UID MOVE", set, mailbox)
+    end
+
     # Sends a SORT command to sort messages in the mailbox.
     # Returns an array of message sequence numbers. For example:
     #
@@ -2625,7 +2639,13 @@ module Net
           return param
         end
         disposition = body_fld_dsp
-        match(T_SPACE)
+
+        token = lookahead
+        if token.symbol == T_SPACE
+          shift_token
+        else
+          return param, disposition
+        end
         language = body_fld_lang
 
         token = lookahead

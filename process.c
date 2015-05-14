@@ -85,6 +85,9 @@
 #endif
 #ifdef HAVE_GRP_H
 #include <grp.h>
+# ifdef __CYGWIN__
+int initgroups(const char *, rb_gid_t);
+# endif
 #endif
 #ifdef HAVE_SYS_ID_H
 #include <sys/id.h>
@@ -256,7 +259,7 @@ typedef unsigned LONG_LONG unsigned_clock_t;
 #endif
 
 static ID id_in, id_out, id_err, id_pid, id_uid, id_gid;
-static ID id_close, id_child, id_status;
+static ID id_close, id_child;
 #ifdef HAVE_SETPGID
 static ID id_pgroup;
 #endif
@@ -279,6 +282,87 @@ static ID id_CLOCK_BASED_CLOCK_PROCESS_CPUTIME_ID;
 static ID id_MACH_ABSOLUTE_TIME_BASED_CLOCK_MONOTONIC;
 #endif
 static ID id_hertz;
+extern ID ruby_static_id_status;
+#define id_status ruby_static_id_status
+
+/*#define DEBUG_REDIRECT*/
+#if defined(DEBUG_REDIRECT)
+
+#include <stdarg.h>
+
+static void
+ttyprintf(const char *fmt, ...)
+{
+    va_list ap;
+    FILE *tty;
+    int save = errno;
+#ifdef _WIN32
+    tty = fopen("con", "w");
+#else
+    tty = fopen("/dev/tty", "w");
+#endif
+    if (!tty)
+        return;
+
+    va_start(ap, fmt);
+    vfprintf(tty, fmt, ap);
+    va_end(ap);
+    fclose(tty);
+    errno = save;
+}
+
+static int
+redirect_dup(int oldfd)
+{
+    int ret;
+    ret = dup(oldfd);
+    ttyprintf("dup(%d) => %d\n", oldfd, ret);
+    return ret;
+}
+
+static int
+redirect_dup2(int oldfd, int newfd)
+{
+    int ret;
+    ret = dup2(oldfd, newfd);
+    ttyprintf("dup2(%d, %d) => %d\n", oldfd, newfd, ret);
+    return ret;
+}
+
+static int
+redirect_close(int fd)
+{
+    int ret;
+    ret = close(fd);
+    ttyprintf("close(%d) => %d\n", fd, ret);
+    return ret;
+}
+
+static int
+parent_redirect_open(const char *pathname, int flags, mode_t perm)
+{
+    int ret;
+    ret = rb_cloexec_open(pathname, flags, perm);
+    ttyprintf("parent_open(\"%s\", 0x%x, 0%o) => %d\n", pathname, flags, perm, ret);
+    return ret;
+}
+
+static int
+parent_redirect_close(int fd)
+{
+    int ret;
+    ret = close(fd);
+    ttyprintf("parent_close(%d) => %d\n", fd, ret);
+    return ret;
+}
+
+#else
+#define redirect_dup(oldfd) dup(oldfd)
+#define redirect_dup2(oldfd, newfd) dup2((oldfd), (newfd))
+#define redirect_close(fd) close(fd)
+#define parent_redirect_open(pathname, flags, perm) rb_cloexec_open((pathname), (flags), (perm))
+#define parent_redirect_close(fd) close(fd)
+#endif
 
 /*
  *  call-seq:
@@ -1512,8 +1596,8 @@ check_exec_redirect(VALUE key, VALUE val, struct rb_execarg *eargp)
                 flags = rb_to_int(flags);
             perm = rb_ary_entry(val, 2);
             perm = NIL_P(perm) ? INT2FIX(0644) : rb_to_int(perm);
-            param = hide_obj(rb_ary_new3(3, hide_obj(EXPORT_DUP(path)),
-                                            flags, perm));
+            param = hide_obj(rb_ary_new3(4, hide_obj(EXPORT_DUP(path)),
+                                            flags, perm, Qnil));
             eargp->fd_open = check_exec_redirect1(eargp->fd_open, key, param);
         }
         break;
@@ -1540,8 +1624,8 @@ check_exec_redirect(VALUE key, VALUE val, struct rb_execarg *eargp)
 	else
             flags = INT2NUM(O_RDONLY);
         perm = INT2FIX(0644);
-        param = hide_obj(rb_ary_new3(3, hide_obj(EXPORT_DUP(path)),
-                                        flags, perm));
+        param = hide_obj(rb_ary_new3(4, hide_obj(EXPORT_DUP(path)),
+                                        flags, perm, Qnil));
         eargp->fd_open = check_exec_redirect1(eargp->fd_open, key, param);
         break;
 
@@ -1767,7 +1851,7 @@ check_exec_fds_1(struct rb_execarg *eargp, VALUE h, int maxhint, VALUE ary)
             if (RTEST(rb_hash_lookup(h, INT2FIX(fd)))) {
                 rb_raise(rb_eArgError, "fd %d specified twice", fd);
             }
-            if (ary == eargp->fd_open || ary == eargp->fd_dup2)
+            if (ary == eargp->fd_dup2)
                 rb_hash_aset(h, INT2FIX(fd), Qtrue);
             else if (ary == eargp->fd_dup2_child)
                 rb_hash_aset(h, INT2FIX(fd), RARRAY_AREF(elt, 1));
@@ -1795,7 +1879,6 @@ check_exec_fds(struct rb_execarg *eargp)
 
     maxhint = check_exec_fds_1(eargp, h, maxhint, eargp->fd_dup2);
     maxhint = check_exec_fds_1(eargp, h, maxhint, eargp->fd_close);
-    maxhint = check_exec_fds_1(eargp, h, maxhint, eargp->fd_open);
     maxhint = check_exec_fds_1(eargp, h, maxhint, eargp->fd_dup2_child);
 
     if (eargp->fd_dup2_child) {
@@ -2205,13 +2288,72 @@ fill_envp_buf_i(st_data_t st_key, st_data_t st_val, st_data_t arg)
 
 static long run_exec_dup2_tmpbuf_size(long n);
 
-void
-rb_execarg_fixup(VALUE execarg_obj)
+struct open_struct {
+    VALUE fname;
+    int oflags;
+    mode_t perm;
+    int ret;
+    int err;
+};
+
+static void *
+open_func(void *ptr)
+{
+    struct open_struct *data = ptr;
+    const char *fname = RSTRING_PTR(data->fname);
+    data->ret = parent_redirect_open(fname, data->oflags, data->perm);
+    data->err = errno;
+    return NULL;
+}
+
+static VALUE
+rb_execarg_parent_start1(VALUE execarg_obj)
 {
     struct rb_execarg *eargp = rb_execarg_get(execarg_obj);
     int unsetenv_others;
     VALUE envopts;
     VALUE ary;
+
+    ary = eargp->fd_open;
+    if (ary != Qfalse) {
+        long i;
+        for (i = 0; i < RARRAY_LEN(ary); i++) {
+            VALUE elt = RARRAY_AREF(ary, i);
+            int fd = FIX2INT(RARRAY_AREF(elt, 0));
+            VALUE param = RARRAY_AREF(elt, 1);
+            VALUE vpath = RARRAY_AREF(param, 0);
+            int flags = NUM2INT(RARRAY_AREF(param, 1));
+            int perm = NUM2INT(RARRAY_AREF(param, 2));
+            VALUE fd2v = RARRAY_AREF(param, 3);
+            int fd2;
+            if (NIL_P(fd2v)) {
+                struct open_struct open_data;
+                FilePathValue(vpath);
+              again:
+                open_data.fname = vpath;
+                open_data.oflags = flags;
+                open_data.perm = perm;
+                open_data.ret = -1;
+                open_data.err = EINTR;
+                rb_thread_call_without_gvl2(open_func, (void *)&open_data, RUBY_UBF_IO, 0);
+                if (open_data.ret == -1) {
+                    if (open_data.err == EINTR) {
+                        rb_thread_check_ints();
+                        goto again;
+                    }
+                    rb_sys_fail("open");
+                }
+                fd2 = open_data.ret;
+                rb_update_max_fd(fd2);
+                RARRAY_ASET(param, 3, INT2FIX(fd2));
+                rb_thread_check_ints();
+            }
+            else {
+                fd2 = NUM2INT(fd2v);
+            }
+            rb_execarg_addopt(execarg_obj, INT2FIX(fd), INT2FIX(fd2));
+        }
+    }
 
     eargp->redirect_fds = check_exec_fds(eargp);
 
@@ -2278,6 +2420,47 @@ rb_execarg_fixup(VALUE execarg_obj)
         }
         */
     }
+
+    RB_GC_GUARD(execarg_obj);
+    return Qnil;
+}
+
+void
+rb_execarg_parent_start(VALUE execarg_obj)
+{
+    int state;
+    rb_protect(rb_execarg_parent_start1, execarg_obj, &state);
+    if (state) {
+        rb_execarg_parent_end(execarg_obj);
+        rb_jump_tag(state);
+    }
+}
+
+void
+rb_execarg_parent_end(VALUE execarg_obj)
+{
+    struct rb_execarg *eargp = rb_execarg_get(execarg_obj);
+    int err = errno;
+    VALUE ary;
+
+    ary = eargp->fd_open;
+    if (ary != Qfalse) {
+        long i;
+        for (i = 0; i < RARRAY_LEN(ary); i++) {
+            VALUE elt = RARRAY_AREF(ary, i);
+            VALUE param = RARRAY_AREF(elt, 1);
+            VALUE fd2v;
+            int fd2;
+            fd2v = RARRAY_AREF(param, 3);
+            if (!NIL_P(fd2v)) {
+                fd2 = FIX2INT(fd2v);
+                parent_redirect_close(fd2);
+                RARRAY_ASET(param, 3, Qnil);
+            }
+        }
+    }
+
+    errno = err;
     RB_GC_GUARD(execarg_obj);
 }
 
@@ -2368,7 +2551,7 @@ rb_f_exec(int argc, const VALUE *argv)
 
     execarg_obj = rb_execarg_new(argc, argv, TRUE);
     eargp = rb_execarg_get(execarg_obj);
-    rb_execarg_fixup(execarg_obj);
+    rb_execarg_parent_start(execarg_obj);
     fail_str = eargp->use_shell ? eargp->invoke.sh.shell_script : eargp->invoke.cmd.command_name;
 
 #if defined(__APPLE__) || defined(__HAIKU__)
@@ -2386,75 +2569,6 @@ rb_f_exec(int argc, const VALUE *argv)
 }
 
 #define ERRMSG(str) do { if (errmsg && 0 < errmsg_buflen) strlcpy(errmsg, (str), errmsg_buflen); } while (0)
-
-/*#define DEBUG_REDIRECT*/
-#if defined(DEBUG_REDIRECT)
-
-#include <stdarg.h>
-
-static void
-ttyprintf(const char *fmt, ...)
-{
-    va_list ap;
-    FILE *tty;
-    int save = errno;
-#ifdef _WIN32
-    tty = fopen("con", "w");
-#else
-    tty = fopen("/dev/tty", "w");
-#endif
-    if (!tty)
-        return;
-
-    va_start(ap, fmt);
-    vfprintf(tty, fmt, ap);
-    va_end(ap);
-    fclose(tty);
-    errno = save;
-}
-
-static int
-redirect_dup(int oldfd)
-{
-    int ret;
-    ret = dup(oldfd);
-    ttyprintf("dup(%d) => %d\n", oldfd, ret);
-    return ret;
-}
-
-static int
-redirect_dup2(int oldfd, int newfd)
-{
-    int ret;
-    ret = dup2(oldfd, newfd);
-    ttyprintf("dup2(%d, %d)\n", oldfd, newfd);
-    return ret;
-}
-
-static int
-redirect_close(int fd)
-{
-    int ret;
-    ret = close(fd);
-    ttyprintf("close(%d)\n", fd);
-    return ret;
-}
-
-static int
-redirect_open(const char *pathname, int flags, mode_t perm)
-{
-    int ret;
-    ret = open(pathname, flags, perm);
-    ttyprintf("open(\"%s\", 0x%x, 0%o) => %d\n", pathname, flags, perm, ret);
-    return ret;
-}
-
-#else
-#define redirect_dup(oldfd) dup(oldfd)
-#define redirect_dup2(oldfd, newfd) dup2((oldfd), (newfd))
-#define redirect_close(fd) close(fd)
-#define redirect_open(pathname, flags, perm) open((pathname), (flags), (perm))
-#endif
 
 static int
 save_redirect_fd(int fd, struct rb_execarg *sargp, char *errmsg, size_t errmsg_buflen)
@@ -2511,6 +2625,29 @@ static long
 run_exec_dup2_tmpbuf_size(long n)
 {
     return sizeof(struct run_exec_dup2_fd_pair) * n;
+}
+
+/* This function should be async-signal-safe.  Actually it is. */
+static int
+fd_clear_cloexec(int fd, char *errmsg, size_t errmsg_buflen)
+{
+#ifdef F_GETFD
+    int ret;
+    ret = fcntl(fd, F_GETFD); /* async-signal-safe */
+    if (ret == -1) {
+        ERRMSG("fcntl(F_GETFD)");
+        return -1;
+    }
+    if (ret & FD_CLOEXEC) {
+        ret &= ~FD_CLOEXEC;
+        ret = fcntl(fd, F_SETFD, ret); /* async-signal-safe */
+        if (ret == -1) {
+            ERRMSG("fcntl(F_SETFD)");
+            return -1;
+        }
+    }
+#endif
+    return 0;
 }
 
 /* This function should be async-signal-safe when sargp is NULL.  Hopefully it is. */
@@ -2582,22 +2719,8 @@ run_exec_dup2(VALUE ary, VALUE tmpbuf, struct rb_execarg *sargp, char *errmsg, s
         if (pairs[i].oldfd == -1)
             continue;
         if (pairs[i].oldfd == pairs[i].newfd) { /* self cycle */
-#ifdef F_GETFD
-            int fd = pairs[i].oldfd;
-            ret = fcntl(fd, F_GETFD); /* async-signal-safe */
-            if (ret == -1) {
-                ERRMSG("fcntl(F_GETFD)");
+            if (fd_clear_cloexec(pairs[i].oldfd, errmsg, errmsg_buflen) == -1) /* async-signal-safe */
                 goto fail;
-            }
-            if (ret & FD_CLOEXEC) {
-                ret &= ~FD_CLOEXEC;
-                ret = fcntl(fd, F_SETFD, ret); /* async-signal-safe */
-                if (ret == -1) {
-                    ERRMSG("fcntl(F_SETFD)");
-                    goto fail;
-                }
-            }
-#endif
             pairs[i].oldfd = -1;
             continue;
         }
@@ -2659,57 +2782,6 @@ run_exec_close(VALUE ary, char *errmsg, size_t errmsg_buflen)
         if (ret == -1) {
             ERRMSG("close");
             return -1;
-        }
-    }
-    return 0;
-}
-
-/* This function should be async-signal-safe when sargp is NULL.  Actually it is. */
-static int
-run_exec_open(VALUE ary, struct rb_execarg *sargp, char *errmsg, size_t errmsg_buflen)
-{
-    long i;
-    int ret;
-
-    for (i = 0; i < RARRAY_LEN(ary);) {
-        VALUE elt = RARRAY_AREF(ary, i);
-        int fd = FIX2INT(RARRAY_AREF(elt, 0));
-        VALUE param = RARRAY_AREF(elt, 1);
-        const VALUE vpath = RARRAY_AREF(param, 0);
-        const char *path = RSTRING_PTR(vpath);
-        int flags = NUM2INT(RARRAY_AREF(param, 1));
-        int perm = NUM2INT(RARRAY_AREF(param, 2));
-        int need_close = 1;
-        int fd2 = redirect_open(path, flags, perm); /* async-signal-safe */
-        if (fd2 == -1) {
-            ERRMSG("open");
-            return -1;
-        }
-        rb_update_max_fd(fd2);
-        while (i < RARRAY_LEN(ary) &&
-               (elt = RARRAY_AREF(ary, i), RARRAY_AREF(elt, 1) == param)) {
-            fd = FIX2INT(RARRAY_AREF(elt, 0));
-            if (fd == fd2) {
-                need_close = 0;
-            }
-            else {
-                if (save_redirect_fd(fd, sargp, errmsg, errmsg_buflen) < 0) /* async-signal-safe */
-                    return -1;
-                ret = redirect_dup2(fd2, fd); /* async-signal-safe */
-                if (ret == -1) {
-                    ERRMSG("dup2");
-                    return -1;
-                }
-                rb_update_max_fd(fd);
-            }
-            i++;
-        }
-        if (need_close) {
-            ret = redirect_close(fd2); /* async-signal-safe */
-            if (ret == -1) {
-                ERRMSG("close");
-                return -1;
-            }
         }
     }
     return 0;
@@ -2915,12 +2987,6 @@ rb_execarg_run_options(const struct rb_execarg *eargp, struct rb_execarg *sargp,
         rb_close_before_exec(3, eargp->close_others_maxhint, eargp->redirect_fds); /* async-signal-safe */
     }
 #endif
-
-    obj = eargp->fd_open;
-    if (obj != Qfalse) {
-        if (run_exec_open(obj, sargp, errmsg, errmsg_buflen) == -1) /* async-signal-safe */
-            return -1;
-    }
 
     obj = eargp->fd_dup2_child;
     if (obj != Qfalse) {
@@ -3835,8 +3901,9 @@ rb_spawn_internal(int argc, const VALUE *argv, char *errmsg, size_t errmsg_bufle
 
     execarg_obj = rb_execarg_new(argc, argv, TRUE);
     eargp = rb_execarg_get(execarg_obj);
-    rb_execarg_fixup(execarg_obj);
+    rb_execarg_parent_start(execarg_obj);
     ret = rb_spawn_process(eargp, errmsg, errmsg_buflen);
+    rb_execarg_parent_end(execarg_obj);
     RB_GC_GUARD(execarg_obj);
     return ret;
 }
@@ -3950,6 +4017,8 @@ rb_f_system(int argc, VALUE *argv)
  *    env: hash
  *      name => val : set the environment variable
  *      name => nil : unset the environment variable
+ *
+ *      the keys must be strings.
  *    command...:
  *      commandline                 : command line string which is passed to the standard shell
  *      cmdname, arg1, ...          : command name and one or more arguments (This form does not use the shell. See below for caveats.)
@@ -4198,10 +4267,11 @@ rb_f_spawn(int argc, VALUE *argv)
 
     execarg_obj = rb_execarg_new(argc, argv, TRUE);
     eargp = rb_execarg_get(execarg_obj);
-    rb_execarg_fixup(execarg_obj);
+    rb_execarg_parent_start(execarg_obj);
     fail_str = eargp->use_shell ? eargp->invoke.sh.shell_script : eargp->invoke.cmd.command_name;
 
     pid = rb_spawn_process(eargp, errmsg, sizeof(errmsg));
+    rb_execarg_parent_end(execarg_obj);
     RB_GC_GUARD(execarg_obj);
 
     if (pid == -1) {
@@ -7818,7 +7888,6 @@ Init_process(void)
     id_gid = rb_intern("gid");
     id_close = rb_intern("close");
     id_child = rb_intern("child");
-    id_status = rb_intern("status");
 #ifdef HAVE_SETPGID
     id_pgroup = rb_intern("pgroup");
 #endif

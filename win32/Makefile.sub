@@ -122,6 +122,9 @@ PLATFORM = mswin32
 !if !defined(RT)
 !error RT not defined.  Retry from configure pass.
 !endif
+!ifndef NTVER
+NTVER = 0x0600
+!endif
 !ifdef NTVER
 ARCHDEFS = -D_WIN32_WINNT=$(NTVER) $(ARCHDEFS)
 !endif
@@ -288,7 +291,9 @@ MINIRUBY = $(MINIRUBY) $(MINIRUBYOPT)
 RUNRUBY = $(RUNRUBY) "$(srcdir)/tool/runruby.rb" --extout="$(EXTOUT)" $(RUNRUBYOPT) -- $(RUN_OPTS)
 !if "$(CROSS_COMPILING)" == "yes"
 XRUBY = $(MINIRUBY)
+BOOTSTRAPRUBY = $(BASERUBY)
 !else
+BOOTSTRAPRUBY = $(MINIRUBY)
 XRUBY = $(RUNRUBY)
 !endif
 BTESTRUBY = $(MINIRUBY)
@@ -370,7 +375,7 @@ EXTOBJS = dmyext.$(OBJEXT)
 arch_hdrdir = $(EXTOUT)/include/$(arch)
 top_srcdir = $(srcdir)
 hdrdir = $(srcdir)/include
-VPATH = $(arch_hdrdir)/ruby;$(hdrdir)/ruby;$(srcdir);$(srcdir)/enc;$(srcdir)/missing;$(win_srcdir)
+VPATH = $(arch_hdrdir)/ruby;$(hdrdir)/ruby;$(srcdir);$(srcdir)/missing;$(win_srcdir)
 
 !if exist($(srcdir)/.svn)
 VCS = svn
@@ -398,10 +403,10 @@ ruby: $(PROGRAM)
 rubyw: $(WPROGRAM)
 stub: $(STUBPROGRAM)
 
-!if !exist(newline.c) && exist($(srcdir)/newline.c)
-NEWLINE_C = $(srcdir)/newline.c
+!if !exist(enc/trans/newline.c) && exist($(srcdir)/enc/trans/newline.c)
+NEWLINE_C = $(srcdir)/enc/trans/newline.c
 !else
-NEWLINE_C = newline.c
+NEWLINE_C = enc/trans/newline.c
 !endif
 !if !exist(miniprelude.c) && exist($(srcdir)/miniprelude.c)
 MINIPRELUDE_C = $(srcdir)/miniprelude.c
@@ -608,6 +613,9 @@ $(CONFIG_H): $(MKFILES) $(srcdir)/win32/Makefile.sub $(win_srcdir)/Makefile.sub
 #define HAVE_STRUCT_STAT_ST_RDEV 1
 #define HAVE_ST_RDEV 1
 #define HAVE_STRUCT_TIMEVAL 1
+!if $(MSC_VER) >= 1900
+#define HAVE_STRUCT_TIMESPEC
+!endif
 !if $(MSC_VER) >= 1600
 #define HAVE_STDINT_H 1
 !else
@@ -703,9 +711,11 @@ $(CONFIG_H): $(MKFILES) $(srcdir)/win32/Makefile.sub $(win_srcdir)/Makefile.sub
 #define HAVE_GETCWD 1
 #define HAVE_TRUNCATE 1
 #define HAVE_FTRUNCATE 1
+#define HAVE_LSTAT 1
 #define HAVE_TIMES 1
 #define HAVE_FCNTL 1
 #define HAVE_LINK 1
+#define HAVE_READLINK 1
 #define HAVE__SETJMP 1
 #define HAVE_TELLDIR 1
 #define HAVE_SEEKDIR 1
@@ -908,6 +918,7 @@ s,@sitearchincludedir@,$${includedir}/$${sitearch},;t t
 s,@arch@,$(ARCH)-$(PLATFORM),;t t
 s,@sitearch@,$(ARCH)-$(RT),;t t
 s,@ruby_version@,$(ruby_version),;t t
+s,@RUBY_PROGRAM_VERSION@,$(ruby_version),;t t
 s,@rubylibprefix@,$${prefix}/lib/$${RUBY_BASE_NAME},;t t
 s,@rubyarchdir@,$${rubylibdir}/$${arch},;t t
 s,@rubylibdir@,$${rubylibprefix}/$${ruby_version},;t t
@@ -938,7 +949,7 @@ miniruby: miniruby$(EXEEXT)
 miniruby$(EXEEXT):
 		@echo $(LIBS)
 		$(ECHO) linking $(@:\=/)
-		$(Q) $(PURIFY) $(CC) $(MAINOBJ) $(MINIOBJS) $(COMMONOBJS) $(INITOBJS) $(LIBS) -Fe$@ -link $(LDFLAGS)
+		$(Q) $(PURIFY) $(CC) $(MAINOBJ) $(MINIOBJS) $(COMMONOBJS) $(LIBS) -Fe$@ -link $(LDFLAGS)
 		@$(RM) miniruby.lib miniruby.exp
 		$(Q) miniruby.exe -v
 		$(Q) $(LDSHARED_1)
@@ -969,9 +980,9 @@ $(WPROGRAM):	$(MAINOBJ) $(WINMAINOBJ) $(LIBRUBY_SO) $(RUBYW_INSTALL_NAME).res
 !endif
 
 !if "$(STUBPROGRAM)" != ""
-$(STUBPROGRAM):	stub.$(OBJEXT) $(LIBRUBY) $(LIBRUBY_SO) $(RUBY_INSTALL_NAME).res
+$(STUBPROGRAM):	win32/stub.$(OBJEXT) $(LIBRUBY) $(LIBRUBY_SO) $(RUBY_INSTALL_NAME).res
 		$(ECHO) linking $(@:\=/)
-		$(Q) $(PURIFY) $(CC) stub.$(OBJEXT) $(RUBY_INSTALL_NAME).res \
+		$(Q) $(PURIFY) $(CC) win32/stub.$(OBJEXT) $(RUBY_INSTALL_NAME).res \
 			$(OUTFLAG)$@ $(LIBRUBYARG) -link $(LDFLAGS) $(XLDFLAGS)
 		$(Q) $(LDSHARED_0)
 		$(Q) $(LDSHARED_1)
@@ -1043,6 +1054,10 @@ clean-enc distclean-enc realclean-enc:
 	@-$(MAKE) -f $(ENC_MK) $(MFLAGS) V=$(V) $(@:-enc=)
 !endif
 
+!if "$(CROSS_COMPILING)" == "no"
+$(RBCONFIG): $(PREP)
+!endif
+
 $(RCFILES): $(RBCONFIG) $(srcdir)/revision.h $(srcdir)/win32/resource.rb
 		@$(MINIRUBY) $(srcdir)/win32/resource.rb \
 			-ruby_name=$(RUBY_INSTALL_NAME) \
@@ -1050,28 +1065,14 @@ $(RCFILES): $(RBCONFIG) $(srcdir)/revision.h $(srcdir)/win32/resource.rb
 			-so_name=$(RUBY_SO_NAME) \
 			. $(icondirs) $(win_srcdir)
 
-$(arch)-fake.rb: $(MKFILES) $(srcdir)/version.h
-	@echo Creating <<$@
-class Object
-  remove_const :CROSS_COMPILING if defined?(CROSS_COMPILING)
-  CROSS_COMPILING = RUBY_PLATFORM
-  remove_const :RUBY_PLATFORM
-  remove_const :RUBY_VERSION
-  remove_const :RUBY_DESCRIPTION if defined?(RUBY_DESCRIPTION)
-  RUBY_PLATFORM = "$(arch)"
-  RUBY_VERSION = $(RUBY_PROGRAM_VERSION)
-  RUBY_DESCRIPTION = "ruby #{RUBY_VERSION} (" $(RUBY_RELEASE_DATE) ") [#{RUBY_PLATFORM}]"
-end
-class File
-  remove_const :ALT_SEPARATOR
-  ALT_SEPARATOR = "\\"
-end
-<<KEEP
-
 $(ruby_pc): $(RBCONFIG)
-	@$(MINIRUBY) -r./rbconfig $(srcdir)/tool/expand-config.rb \
-	$(srcdir)/template/ruby.pc.in > $@
+	@$(BOOTSTRAPRUBY) $(srcdir)/tool/expand-config.rb \
+		-output=$@ -mode=$(INSTALL_DATA_MODE) -config=rbconfig.rb \
+		$(srcdir)/template/ruby.pc.in
 
+{$(srcdir)/enc/trans}.c.obj:
+	$(ECHO) compiling $(<:\=/)
+	$(Q) $(CC) $(CFLAGS) $(XCFLAGS) $(CPPFLAGS) $(COUTFLAG)$@ -c -Tc$(<:\=/)
 {$(srcdir)/enc}.c.obj:
 	$(ECHO) compiling $(<:\=/)
 	$(Q) $(CC) $(CFLAGS) $(XCFLAGS) $(CPPFLAGS) $(COUTFLAG)$@ -c -Tc$(<:\=/)

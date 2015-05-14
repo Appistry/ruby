@@ -47,9 +47,6 @@ static const char REPORTBUG_MSG[] =
 	" or extension libraries.\n" \
 	"Bug reports are welcome.\n" \
 	""
-#if defined __APPLE__
-	"Don't forget to include the above Crash Report log file.\n"
-#endif
 	"For details: http://www.ruby-lang.org/bugreport.html\n\n" \
     ;
 
@@ -198,10 +195,10 @@ rb_compile_warning(const char *file, int line, const char *fmt, ...)
     va_end(args);
 }
 
-static void
-warn_print(const char *fmt, va_list args)
+static VALUE
+warning_string(rb_encoding *enc, const char *fmt, va_list args)
 {
-    VALUE str = rb_str_new(0, 0);
+    VALUE str = rb_enc_str_new(0, 0, enc);
     VALUE file = rb_sourcefilename();
 
     if (!NIL_P(file)) {
@@ -214,33 +211,69 @@ warn_print(const char *fmt, va_list args)
     rb_str_cat2(str, "warning: ");
     rb_str_vcatf(str, fmt, args);
     rb_str_cat2(str, "\n");
-    rb_write_error_str(str);
+    return str;
 }
 
 void
 rb_warn(const char *fmt, ...)
 {
+    VALUE mesg;
     va_list args;
 
     if (NIL_P(ruby_verbose)) return;
 
     va_start(args, fmt);
-    warn_print(fmt, args);
+    mesg = warning_string(0, fmt, args);
     va_end(args);
+    rb_write_error_str(mesg);
 }
+
+#if 0
+void
+rb_enc_warn(rb_encoding *enc, const char *fmt, ...)
+{
+    VALUE mesg;
+    va_list args;
+
+    if (NIL_P(ruby_verbose)) return;
+
+    va_start(args, fmt);
+    mesg = warning_string(enc, fmt, args);
+    va_end(args);
+    rb_write_error_str(mesg);
+}
+#endif
 
 /* rb_warning() reports only in verbose mode */
 void
 rb_warning(const char *fmt, ...)
 {
+    VALUE mesg;
     va_list args;
 
     if (!RTEST(ruby_verbose)) return;
 
     va_start(args, fmt);
-    warn_print(fmt, args);
+    mesg = warning_string(0, fmt, args);
     va_end(args);
+    rb_write_error_str(mesg);
 }
+
+#if 0
+void
+rb_enc_warning(rb_encoding *enc, const char *fmt, ...)
+{
+    VALUE mesg;
+    va_list args;
+
+    if (!RTEST(ruby_verbose)) return;
+
+    va_start(args, fmt);
+    mesg = warning_string(enc, fmt, args);
+    va_end(args);
+    rb_write_error_str(mesg);
+}
+#endif
 
 /*
  * call-seq:
@@ -468,12 +501,11 @@ static const char builtin_types[][10] = {
     "false",
     "Symbol",			/* :symbol */
     "Fixnum",
-    "",				/* 0x16 */
+    "undef",			/* internal use: #undef; should not happen */
     "",				/* 0x17 */
     "",				/* 0x18 */
     "",				/* 0x19 */
-    "",				/* 0x1a */
-    "undef",			/* internal use: #undef; should not happen */
+    "Memo",			/* internal use: general memo */
     "Node",			/* internal use: syntax tree node */
     "iClass",			/* internal use: mixed-in module holder */
 };
@@ -609,12 +641,20 @@ VALUE rb_eSystemCallError;
 VALUE rb_mErrno;
 static VALUE rb_eNOERROR;
 
+static ID id_new, id_cause, id_message, id_backtrace;
+static ID id_name, id_args, id_Errno, id_errno, id_i_path;
+extern ID ruby_static_id_status;
+#define id_bt idBt
+#define id_bt_locations idBt_locations
+#define id_mesg idMesg
+#define id_status ruby_static_id_status
+
 #undef rb_exc_new_cstr
 
 VALUE
 rb_exc_new(VALUE etype, const char *ptr, long len)
 {
-    return rb_funcall(etype, rb_intern("new"), 1, rb_str_new(ptr, len));
+    return rb_funcall(etype, id_new, 1, rb_str_new(ptr, len));
 }
 
 VALUE
@@ -627,7 +667,7 @@ VALUE
 rb_exc_new_str(VALUE etype, VALUE str)
 {
     StringValue(str);
-    return rb_funcall(etype, rb_intern("new"), 1, str);
+    return rb_funcall(etype, id_new, 1, str);
 }
 
 /*
@@ -644,8 +684,8 @@ exc_initialize(int argc, VALUE *argv, VALUE exc)
     VALUE arg;
 
     rb_scan_args(argc, argv, "01", &arg);
-    rb_iv_set(exc, "mesg", arg);
-    rb_iv_set(exc, "bt", Qnil);
+    rb_ivar_set(exc, id_mesg, arg);
+    rb_ivar_set(exc, id_bt, Qnil);
 
     return exc;
 }
@@ -687,7 +727,7 @@ exc_exception(int argc, VALUE *argv, VALUE self)
 static VALUE
 exc_to_s(VALUE exc)
 {
-    VALUE mesg = rb_attr_get(exc, rb_intern("mesg"));
+    VALUE mesg = rb_attr_get(exc, idMesg);
 
     if (NIL_P(mesg)) return rb_class_name(CLASS_OF(exc));
     return rb_String(mesg);
@@ -706,7 +746,7 @@ exc_to_s(VALUE exc)
 static VALUE
 exc_message(VALUE exc)
 {
-    return rb_funcall(exc, rb_intern("to_s"), 0, 0);
+    return rb_funcallv(exc, idTo_s, 0, 0);
 }
 
 /*
@@ -769,15 +809,13 @@ exc_inspect(VALUE exc)
 static VALUE
 exc_backtrace(VALUE exc)
 {
-    ID bt;
     VALUE obj;
 
-    CONST_ID(bt, "bt");
-    obj = rb_attr_get(exc, bt);
+    obj = rb_attr_get(exc, id_bt);
 
     if (rb_backtrace_p(obj)) {
 	obj = rb_backtrace_to_str_ary(obj);
-	/* rb_iv_set(exc, "bt", obj); */
+	/* rb_ivar_set(exc, id_bt, obj); */
     }
 
     return obj;
@@ -796,11 +834,9 @@ exc_backtrace(VALUE exc)
 static VALUE
 exc_backtrace_locations(VALUE exc)
 {
-    ID bt_locations;
     VALUE obj;
 
-    CONST_ID(bt_locations, "bt_locations");
-    obj = rb_attr_get(exc, bt_locations);
+    obj = rb_attr_get(exc, id_bt_locations);
     if (!NIL_P(obj)) {
 	obj = rb_backtrace_to_location_ary(obj);
     }
@@ -842,7 +878,7 @@ rb_check_backtrace(VALUE bt)
 static VALUE
 exc_set_backtrace(VALUE exc, VALUE bt)
 {
-    return rb_iv_set(exc, "bt", rb_check_backtrace(bt));
+    return rb_ivar_set(exc, id_bt, rb_check_backtrace(bt));
 }
 
 VALUE
@@ -863,8 +899,6 @@ rb_exc_set_backtrace(VALUE exc, VALUE bt)
 VALUE
 exc_cause(VALUE exc)
 {
-    ID id_cause;
-    CONST_ID(id_cause, "cause");
     return rb_attr_get(exc, id_cause);
 }
 
@@ -887,15 +921,11 @@ static VALUE
 exc_equal(VALUE exc, VALUE obj)
 {
     VALUE mesg, backtrace;
-    const ID id_mesg = idMesg;
 
     if (exc == obj) return Qtrue;
 
     if (rb_obj_class(exc) != rb_obj_class(obj)) {
 	int status = 0;
-	ID id_message, id_backtrace;
-	CONST_ID(id_message, "message");
-	CONST_ID(id_backtrace, "backtrace");
 
 	obj = rb_protect(try_convert_to_exception, obj, &status);
 	if (status || obj == Qundef) {
@@ -970,7 +1000,7 @@ exit_initialize(int argc, VALUE *argv, VALUE exc)
 	status = INT2FIX(EXIT_SUCCESS);
     }
     rb_call_super(argc, argv);
-    rb_iv_set(exc, "status", status);
+    rb_ivar_set(exc, id_status, status);
     return exc;
 }
 
@@ -985,7 +1015,7 @@ exit_initialize(int argc, VALUE *argv, VALUE exc)
 static VALUE
 exit_status(VALUE exc)
 {
-    return rb_attr_get(exc, rb_intern("status"));
+    return rb_attr_get(exc, id_status);
 }
 
 
@@ -999,7 +1029,7 @@ exit_status(VALUE exc)
 static VALUE
 exit_success_p(VALUE exc)
 {
-    VALUE status_val = rb_attr_get(exc, rb_intern("status"));
+    VALUE status_val = rb_attr_get(exc, id_status);
     int status;
 
     if (NIL_P(status_val))
@@ -1057,7 +1087,7 @@ name_err_initialize(int argc, VALUE *argv, VALUE self)
 
     name = (argc > 1) ? argv[--argc] : Qnil;
     rb_call_super(argc, argv);
-    rb_iv_set(self, "name", name);
+    rb_ivar_set(self, id_name, name);
     return self;
 }
 
@@ -1071,7 +1101,7 @@ name_err_initialize(int argc, VALUE *argv, VALUE self)
 static VALUE
 name_err_name(VALUE self)
 {
-    return rb_attr_get(self, rb_intern("name"));
+    return rb_attr_get(self, id_name);
 }
 
 /*
@@ -1089,7 +1119,7 @@ nometh_err_initialize(int argc, VALUE *argv, VALUE self)
 {
     VALUE args = (argc > 2) ? argv[--argc] : Qnil;
     name_err_initialize(argc, argv, self);
-    rb_iv_set(self, "args", args);
+    rb_ivar_set(self, id_args, args);
     return self;
 }
 
@@ -1231,7 +1261,7 @@ name_err_mesg_load(VALUE klass, VALUE str)
 static VALUE
 nometh_err_args(VALUE self)
 {
-    return rb_attr_get(self, rb_intern("args"));
+    return rb_attr_get(self, id_args);
 }
 
 void
@@ -1361,7 +1391,7 @@ syserr_initialize(int argc, VALUE *argv, VALUE self)
     }
     else {
 	rb_scan_args(argc, argv, "02", &mesg, &func);
-	error = rb_const_get(klass, rb_intern("Errno"));
+	error = rb_const_get(klass, id_Errno);
     }
     if (!NIL_P(error)) err = strerror(NUM2INT(error));
     else err = "unknown error";
@@ -1377,7 +1407,7 @@ syserr_initialize(int argc, VALUE *argv, VALUE self)
     mesg = errmsg;
 
     rb_call_super(1, &mesg);
-    rb_iv_set(self, "errno", error);
+    rb_ivar_set(self, id_errno, error);
     return self;
 }
 
@@ -1391,7 +1421,7 @@ syserr_initialize(int argc, VALUE *argv, VALUE self)
 static VALUE
 syserr_errno(VALUE self)
 {
-    return rb_attr_get(self, rb_intern("errno"));
+    return rb_attr_get(self, id_errno);
 }
 
 /*
@@ -1406,20 +1436,17 @@ static VALUE
 syserr_eqq(VALUE self, VALUE exc)
 {
     VALUE num, e;
-    ID en;
-
-    CONST_ID(en, "errno");
 
     if (!rb_obj_is_kind_of(exc, rb_eSystemCallError)) {
-	if (!rb_respond_to(exc, en)) return Qfalse;
+	if (!rb_respond_to(exc, id_errno)) return Qfalse;
     }
     else if (self == rb_eSystemCallError) return Qtrue;
 
-    num = rb_attr_get(exc, rb_intern("errno"));
+    num = rb_attr_get(exc, id_errno);
     if (NIL_P(num)) {
-	num = rb_funcall(exc, en, 0, 0);
+	num = rb_funcallv(exc, id_errno, 0, 0);
     }
-    e = rb_const_get(self, rb_intern("Errno"));
+    e = rb_const_get(self, id_Errno);
     if (FIXNUM_P(num) ? num == e : rb_equal(num, e))
 	return Qtrue;
     return Qfalse;
@@ -1879,6 +1906,16 @@ Init_Exception(void)
     rb_mErrno = rb_define_module("Errno");
 
     rb_define_global_function("warn", rb_warn_m, -1);
+
+    id_new = rb_intern_const("new");
+    id_cause = rb_intern_const("cause");
+    id_message = rb_intern_const("message");
+    id_backtrace = rb_intern_const("backtrace");
+    id_name = rb_intern_const("name");
+    id_args = rb_intern_const("args");
+    id_Errno = rb_intern_const("Errno");
+    id_errno = rb_intern_const("errno");
+    id_i_path = rb_intern_const("@path");
 }
 
 void
@@ -1912,7 +1949,7 @@ static void
 raise_loaderror(VALUE path, VALUE mesg)
 {
     VALUE err = rb_exc_new3(rb_eLoadError, mesg);
-    rb_ivar_set(err, rb_intern("@path"), path);
+    rb_ivar_set(err, id_i_path, path);
     rb_exc_raise(err);
 }
 
@@ -2088,7 +2125,7 @@ rb_mod_syserr_fail_str(VALUE mod, int e, VALUE mesg)
 void
 rb_sys_warning(const char *fmt, ...)
 {
-    char buf[BUFSIZ];
+    VALUE mesg;
     va_list args;
     int errno_save;
 
@@ -2096,12 +2133,32 @@ rb_sys_warning(const char *fmt, ...)
 
     if (!RTEST(ruby_verbose)) return;
 
-    snprintf(buf, BUFSIZ, "warning: %s", fmt);
-    snprintf(buf+strlen(buf), BUFSIZ-strlen(buf), ": %s", strerror(errno_save));
+    va_start(args, fmt);
+    mesg = warning_string(0, fmt, args);
+    va_end(args);
+    rb_str_set_len(mesg, RSTRING_LEN(mesg)-1);
+    rb_str_catf(mesg, ": %s\n", strerror(errno_save));
+    rb_write_error_str(mesg);
+    errno = errno_save;
+}
+
+void
+rb_sys_enc_warning(rb_encoding *enc, const char *fmt, ...)
+{
+    VALUE mesg;
+    va_list args;
+    int errno_save;
+
+    errno_save = errno;
+
+    if (!RTEST(ruby_verbose)) return;
 
     va_start(args, fmt);
-    warn_print(buf, args);
+    mesg = warning_string(enc, fmt, args);
     va_end(args);
+    rb_str_set_len(mesg, RSTRING_LEN(mesg)-1);
+    rb_str_catf(mesg, ": %s\n", strerror(errno_save));
+    rb_write_error_str(mesg);
     errno = errno_save;
 }
 

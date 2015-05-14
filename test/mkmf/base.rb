@@ -11,6 +11,9 @@ $INCFLAGS << " -I."
 $extout_prefix = "$(extout)$(target_prefix)/"
 
 class TestMkmf < Test::Unit::TestCase
+end
+
+module TestMkmf::Base
   MKMFLOG = proc {File.read("mkmf.log") rescue ""}
 
   class Capture
@@ -125,5 +128,13 @@ class TestMkmf < Test::Unit::TestCase
       f.grep(/^---config-value=(.*)/) {return $1}
     end
     nil
+  end
+end
+
+class TestMkmf
+  include TestMkmf::Base
+
+  def assert_separately(args, src, *rest)
+    super(args + ["-r#{__FILE__}"], "extend TestMkmf::Base; setup\nEND{teardown}\n#{src}", *rest)
   end
 end

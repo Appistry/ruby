@@ -237,9 +237,14 @@ NORETURN(static void coerce_failed(VALUE x, VALUE y));
 static void
 coerce_failed(VALUE x, VALUE y)
 {
+    if (SPECIAL_CONST_P(y) || BUILTIN_TYPE(y) == T_FLOAT) {
+	y = rb_inspect(y);
+    }
+    else {
+	y = rb_obj_class(y);
+    }
     rb_raise(rb_eTypeError, "%"PRIsVALUE" can't be coerced into %"PRIsVALUE,
-	     (rb_special_const_p(y)? rb_inspect(y) : rb_obj_class(y)),
-	     rb_obj_class(x));
+	     y, rb_obj_class(x));
 }
 
 static VALUE
@@ -609,7 +614,7 @@ num_zero_p(VALUE num)
 static VALUE
 num_nonzero_p(VALUE num)
 {
-    if (RTEST(rb_funcall(num, rb_intern("zero?"), 0, 0))) {
+    if (RTEST(rb_funcallv(num, rb_intern("zero?"), 0, 0))) {
 	return Qnil;
     }
     return num;
@@ -629,7 +634,7 @@ num_nonzero_p(VALUE num)
 static VALUE
 num_to_int(VALUE num)
 {
-    return rb_funcall(num, id_to_i, 0, 0);
+    return rb_funcallv(num, id_to_i, 0, 0);
 }
 
 
@@ -1132,10 +1137,14 @@ flo_eq(VALUE x, VALUE y)
 static VALUE
 flo_hash(VALUE num)
 {
-    double d;
+    return rb_dbl_hash(RFLOAT_VALUE(num));
+}
+
+VALUE
+rb_dbl_hash(double d)
+{
     st_index_t hash;
 
-    d = RFLOAT_VALUE(num);
     /* normalize -0.0 to 0.0 */
     if (d == 0.0) d = 0.0;
     hash = rb_memhash(&d, sizeof(d));
@@ -2859,6 +2868,10 @@ fix_plus(VALUE x, VALUE y)
     else if (RB_TYPE_P(y, T_FLOAT)) {
 	return DBL2NUM((double)FIX2LONG(x) + RFLOAT_VALUE(y));
     }
+    else if (RB_TYPE_P(y, T_COMPLEX)) {
+	VALUE rb_nucomp_add(VALUE, VALUE);
+	return rb_nucomp_add(y, x);
+    }
     else {
 	return rb_num_coerce_bin(x, y, '+');
     }
@@ -2947,6 +2960,10 @@ fix_mul(VALUE x, VALUE y)
     }
     else if (RB_TYPE_P(y, T_FLOAT)) {
 	return DBL2NUM((double)FIX2LONG(x) * RFLOAT_VALUE(y));
+    }
+    else if (RB_TYPE_P(y, T_COMPLEX)) {
+	VALUE rb_nucomp_mul(VALUE, VALUE);
+	return rb_nucomp_mul(y, x);
     }
     else {
 	return rb_num_coerce_bin(x, y, '*');
@@ -3426,10 +3443,11 @@ static int
 bit_coerce(VALUE *x, VALUE *y)
 {
     if (!FIXNUM_P(*y) && !RB_TYPE_P(*y, T_BIGNUM)) {
+	VALUE orig = *x;
 	do_coerce(x, y, TRUE);
 	if (!FIXNUM_P(*x) && !RB_TYPE_P(*x, T_BIGNUM)
 	    && !FIXNUM_P(*y) && !RB_TYPE_P(*y, T_BIGNUM)) {
-	    coerce_failed(*x, *y);
+	    coerce_failed(orig, *y);
 	}
     }
     return TRUE;

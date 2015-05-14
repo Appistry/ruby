@@ -1548,7 +1548,7 @@ timelocalw(struct vtm *vtm)
     tm.tm_hour = vtm->hour;
     tm.tm_min = vtm->min;
     tm.tm_sec = vtm->sec;
-    tm.tm_isdst = vtm->isdst;
+    tm.tm_isdst = vtm->isdst == VTM_ISDST_INITVAL ? -1 : vtm->isdst;
 
     if (find_time_t(&tm, 0, &t))
         goto no_localtime;
@@ -1639,6 +1639,10 @@ localtime_with_gmtoff_zone(const time_t *t, struct tm *result, long *gmtoff, con
             else
                 *zone = zone_str("(NO-TIMEZONE-ABBREVIATION)");
 #elif defined(HAVE_TZNAME) && defined(HAVE_DAYLIGHT)
+# if RUBY_MSVCRT_VERSION >= 140
+#  define tzname _tzname
+#  define daylight _daylight
+# endif
             /* this needs tzset or localtime, instead of localtime_r */
             *zone = zone_str(tzname[daylight && tm.tm_isdst]);
 #else
@@ -4197,6 +4201,9 @@ time_zone_name(const char *zone)
     VALUE name = rb_str_new_cstr(zone);
     if (!rb_enc_str_asciionly_p(name)) {
 	name = rb_external_str_with_enc(name, rb_locale_encoding());
+    }
+    else {
+	rb_enc_associate(name, rb_usascii_encoding());
     }
     return name;
 }

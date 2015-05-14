@@ -46,37 +46,46 @@ class TestObjSpace < Test::Unit::TestCase
   def test_memsize_of_all
     assert_kind_of(Integer, a = ObjectSpace.memsize_of_all)
     assert_kind_of(Integer, b = ObjectSpace.memsize_of_all(String))
-    assert(a > b)
-    assert(a > 0)
-    assert(b > 0)
+    assert_operator(a, :>, b)
+    assert_operator(a, :>, 0)
+    assert_operator(b, :>, 0)
     assert_raise(TypeError) {ObjectSpace.memsize_of_all('error')}
   end
 
   def test_count_objects_size
     res = ObjectSpace.count_objects_size
-    assert_equal(false, res.empty?)
-    assert_equal(true, res[:TOTAL] > 0)
+    assert_not_empty(res)
+    assert_operator(res[:TOTAL], :>, 0)
     arg = {}
     ObjectSpace.count_objects_size(arg)
-    assert_equal(false, arg.empty?)
+    assert_not_empty(arg)
   end
 
   def test_count_nodes
     res = ObjectSpace.count_nodes
-    assert_equal(false, res.empty?)
+    assert_not_empty(res)
     arg = {}
     ObjectSpace.count_nodes(arg)
     assert_not_empty(arg)
     bug8014 = '[ruby-core:53130] [Bug #8014]'
     assert_empty(arg.select {|k, v| !(Symbol === k && Integer === v)}, bug8014)
-  end
+  end if false
 
   def test_count_tdata_objects
     res = ObjectSpace.count_tdata_objects
-    assert_equal(false, res.empty?)
+    assert_not_empty(res)
     arg = {}
     ObjectSpace.count_tdata_objects(arg)
-    assert_equal(false, arg.empty?)
+    assert_not_empty(arg)
+  end
+
+  def test_count_imemo_objects
+    res = ObjectSpace.count_imemo_objects
+    assert_not_empty(res)
+    assert_not_nil(res[:imemo_cref])
+    arg = {}
+    res = ObjectSpace.count_imemo_objects(arg)
+    assert_not_empty(res)
   end
 
   def test_reachable_objects_from
@@ -196,7 +205,7 @@ class TestObjSpace < Test::Unit::TestCase
 
   def test_dump_flags
     info = ObjectSpace.dump("foo".freeze)
-    assert_match /"wb_protected":true, "old":true, "long_lived":true, "marked":true/, info
+    assert_match /"wb_protected":true, "old":true, "uncollectible":true, "marked":true/, info
     assert_match /"fstring":true/, info
   end
 

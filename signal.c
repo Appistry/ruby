@@ -45,6 +45,9 @@
 # include "nacl/signal.h"
 #endif
 
+extern ID ruby_static_id_signo;
+#define id_signo ruby_static_id_signo
+
 #ifdef NEED_RUBY_ATOMIC_OPS
 rb_atomic_t
 ruby_atomic_exchange(rb_atomic_t *ptr, rb_atomic_t val)
@@ -254,6 +257,7 @@ static VALUE
 sig_signame(VALUE recv, VALUE signo)
 {
     const char *signame = signo2signm(NUM2INT(signo));
+    if (!signame) return Qnil;
     return rb_str_new_cstr(signame);
 }
 
@@ -326,7 +330,7 @@ esignal_init(int argc, VALUE *argv, VALUE self)
 	sig = rb_sprintf("SIG%s", signm);
     }
     rb_call_super(1, &sig);
-    rb_iv_set(self, "signo", INT2NUM(signo));
+    rb_ivar_set(self, id_signo, INT2NUM(signo));
 
     return self;
 }
@@ -341,7 +345,7 @@ esignal_init(int argc, VALUE *argv, VALUE self)
 static VALUE
 esignal_signo(VALUE self)
 {
-    return rb_iv_get(self, "signo");
+    return rb_ivar_get(self, id_signo);
 }
 
 /* :nodoc: */
@@ -688,11 +692,15 @@ signal_enque(int sig)
 static RETSIGTYPE
 sighandler(int sig)
 {
+    int old_errnum = errno;
+
     signal_enque(sig);
     rb_thread_wakeup_timer_thread();
 #if !defined(BSD_SIGNAL) && !defined(POSIX_SIGNAL)
     ruby_signal(sig, sighandler);
 #endif
+
+    errno = old_errnum;
 }
 
 int
@@ -848,7 +856,8 @@ sigbus(int sig SIGINFO_ARG)
  * and it's delivered as SIGBUS instead of SIGSEGV to userland. It's crazy
  * wrong IMHO. but anyway we have to care it. Sigh.
  */
-#if defined __APPLE__
+    /* Seems Linux also delivers SIGBUS. */
+#if defined __APPLE__ || defined __linux__
     CHECK_STACK_OVERFLOW();
 #endif
     rb_bug_context(SIGINFO_CTX, "Bus Error" MESSAGE_FAULT_ADDRESS);

@@ -221,6 +221,9 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     @orig_gem_home   = ENV['GEM_HOME']
     @orig_gem_path   = ENV['GEM_PATH']
     @orig_gem_vendor = ENV['GEM_VENDOR']
+    @orig_gem_spec_cache = ENV['GEM_SPEC_CACHE']
+    @orig_rubygems_gemdeps = ENV['RUBYGEMS_GEMDEPS']
+    @orig_rubygems_host = ENV['RUBYGEMS_HOST']
 
     ENV['GEM_VENDOR'] = nil
 
@@ -353,6 +356,9 @@ class Gem::TestCase < MiniTest::Unit::TestCase
     ENV['GEM_HOME']   = @orig_gem_home
     ENV['GEM_PATH']   = @orig_gem_path
     ENV['GEM_VENDOR'] = @orig_gem_vendor
+    ENV['GEM_SPEC_CACHE'] = @orig_gem_spec_cache
+    ENV['RUBYGEMS_GEMDEPS'] = @orig_rubygems_gemdeps
+    ENV['RUBYGEMS_HOST'] = @orig_rubygems_host
 
     Gem.ruby = @orig_ruby if @orig_ruby
 
@@ -1102,7 +1108,7 @@ Also, a list:
   # other platforms, including Cygwin, it will return 'make'.
 
   def self.make_command
-    ENV["make"] || (vc_windows? ? 'nmake' : 'make')
+    ENV["make"] || ENV["MAKE"] || (vc_windows? ? 'nmake' : 'make')
   end
 
   ##
@@ -1111,7 +1117,7 @@ Also, a list:
   # other platforms, including Cygwin, it will return 'make'.
 
   def make_command
-    ENV["make"] || (vc_windows? ? 'nmake' : 'make')
+    ENV["make"] || ENV["MAKE"] || (vc_windows? ? 'nmake' : 'make')
   end
 
   ##
@@ -1426,5 +1432,28 @@ Also, a list:
 
 end
 
-require 'rubygems/test_utilities'
+# require dependencies that are not discoverable once GEM_HOME and GEM_PATH
+# are wiped
+begin
+  gem 'rake'
+rescue Gem::LoadError
+end
 
+begin
+  require 'rake/packagetask'
+rescue LoadError
+end
+
+begin
+  gem 'rdoc'
+  require 'rdoc'
+rescue LoadError, Gem::LoadError
+end
+
+require 'rubygems/test_utilities'
+tmpdirs = []
+tmpdirs << (ENV['GEM_HOME'] = Dir.mktmpdir("home"))
+tmpdirs << (ENV['GEM_PATH'] = Dir.mktmpdir("path"))
+pid = $$
+END {tmpdirs.each {|dir| Dir.rmdir(dir)} if $$ == pid}
+Gem.clear_paths

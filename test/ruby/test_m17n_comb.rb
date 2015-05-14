@@ -659,7 +659,9 @@ class TestM17NComb < Test::Unit::TestCase
     combination(STRINGS, STRINGS) {|s1, s2|
       if !s1.ascii_only? && !s2.ascii_only? && !Encoding.compatible?(s1,s2)
         if s1.bytesize > s2.bytesize
-          assert_raise(Encoding::CompatibilityError) { s1.chomp(s2) }
+          assert_raise(Encoding::CompatibilityError, "#{encdump(s1)}.chomp(#{encdump(s2)})") do
+            s1.chomp(s2)
+          end
         end
         next
       end
@@ -670,6 +672,17 @@ class TestM17NComb < Test::Unit::TestCase
       t2.chomp!(s2)
       assert_equal(t, t2)
     }
+  end
+
+  def test_str_smart_chomp
+    bug10893 = '[ruby-core:68258] [Bug #10893]'
+    encodings = Encoding.list.select {|enc| !enc.dummy?}
+    combination(encodings, encodings) do |e1, e2|
+      expected = "abc".encode(e1)
+      combination(["abc\n", "abc\r\n"], ["", "\n"]) do |str, rs|
+        assert_equal(expected, str.encode(e1).chomp(rs.encode(e2)), bug10893)
+      end
+    end
   end
 
   def test_str_chop
@@ -730,26 +743,41 @@ class TestM17NComb < Test::Unit::TestCase
     }
   end
 
-  def test_str_crypt
-    strict_crypt = nil
-    # glibc 2.16 or later denies salt contained other than [0-9A-Za-z./] #7312
-    if defined? Etc::CS_GNU_LIBC_VERSION
-      glibcver = Etc.confstr(Etc::CS_GNU_LIBC_VERSION).scan(/\d+/).map(&:to_i)
-      strict_crypt = (glibcver <=> [2, 16]) >= 0
-    end
+  # glibc 2.16 or later denies salt contained other than [0-9A-Za-z./] #7312
+  # we use this check to test strict and non-strict behavior separately #11045
+  strict_crypt = if defined? Etc::CS_GNU_LIBC_VERSION
+    glibcver = Etc.confstr(Etc::CS_GNU_LIBC_VERSION).scan(/\d+/).map(&:to_i)
+    (glibcver <=> [2, 16]) >= 0
+  end
 
+  def test_str_crypt
     combination(STRINGS, STRINGS) {|str, salt|
-      if strict_crypt
-        next unless salt.ascii_only? && /\A[0-9a-zA-Z.\/]+\z/ =~ salt
-      end
-      if b(salt).length < 2
-        assert_raise(ArgumentError) { str.crypt(salt) }
-        next
-      end
-      t = str.crypt(salt)
-      assert_equal(b(str).crypt(b(salt)), t, "#{encdump(str)}.crypt(#{encdump(salt)})")
-      assert_encoding('ASCII-8BIT', t.encoding)
+      # skip input other than [0-9A-Za-z./] to confirm strict behavior
+      next unless salt.ascii_only? && /\A[0-9a-zA-Z.\/]+\z/ =~ salt
+
+      confirm_crypt_result(str, salt)
     }
+  end
+
+  if !strict_crypt
+    def test_str_crypt_nonstrict
+      combination(STRINGS, STRINGS) {|str, salt|
+        # only test input other than [0-9A-Za-z./] to confirm non-strict behavior
+        next if salt.ascii_only? && /\A[0-9a-zA-Z.\/]+\z/ =~ salt
+
+        confirm_crypt_result(str, salt)
+      }
+    end
+  end
+
+  private def confirm_crypt_result(str, salt)
+    if b(salt).length < 2
+      assert_raise(ArgumentError) { str.crypt(salt) }
+      return
+    end
+    t = str.crypt(salt)
+    assert_equal(b(str).crypt(b(salt)), t, "#{encdump(str)}.crypt(#{encdump(salt)})")
+    assert_encoding('ASCII-8BIT', t.encoding)
   end
 
   def test_str_delete

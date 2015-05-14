@@ -136,6 +136,13 @@ class TestSyntax < Test::Unit::TestCase
     assert_equal([1, 2], a, bug10315)
   end
 
+  def test_keyword_empty_splat
+    assert_separately([], <<-'end;')
+      bug10719 = '[ruby-core:67446] [Bug #10719]'
+      assert_valid_syntax("foo(a: 1, **{})", bug10719)
+    end;
+  end
+
   def test_keyword_self_reference
     bug9593 = '[ruby-core:61299] [Bug #9593]'
     o = Object.new
@@ -288,6 +295,15 @@ WARN
     assert_not_label(:foo, 'class Foo < not_label:foo; end', bug6347)
   end
 
+  def test_no_label_with_percent
+    assert_syntax_error('{%"a": 1}', /unexpected ':'/)
+    assert_syntax_error("{%'a': 1}", /unexpected ':'/)
+    assert_syntax_error('{%Q"a": 1}', /unexpected ':'/)
+    assert_syntax_error("{%Q'a': 1}", /unexpected ':'/)
+    assert_syntax_error('{%q"a": 1}', /unexpected ':'/)
+    assert_syntax_error("{%q'a': 1}", /unexpected ':'/)
+  end
+
   def test_duplicated_arg
     assert_syntax_error("def foo(a, a) end", /duplicated argument name/)
     assert_nothing_raised { def foo(_, _) end }
@@ -391,6 +407,11 @@ WARN
   def test_do_block_in_call_args
     bug9308 = '[ruby-core:59342] [Bug #9308]'
     assert_valid_syntax("bar def foo; self.each do end end", bug9308)
+  end
+
+  def test_do_block_in_lambda
+    bug11107 = '[ruby-core:69017] [Bug #11107]'
+    assert_valid_syntax('p ->() do a() do end end', bug11107)
   end
 
   def test_reserved_method_no_args
@@ -548,6 +569,14 @@ eom
     bug10545 = '[ruby-dev:48742] [Bug #10545]'
     src = 'def foo(A: a) end'
     assert_syntax_error(src, /formal argument/, bug10545)
+  end
+
+  def test_null_range_cmdarg
+    bug10957 = '[ruby-core:68477] [Bug #10957]'
+    assert_ruby_status(['-c', '-e', 'p ()..0'], "", bug10957)
+    assert_ruby_status(['-c', '-e', 'p ()...0'], "", bug10957)
+    assert_syntax_error('0..%w.', /unterminated string/, bug10957)
+    assert_syntax_error('0...%w.', /unterminated string/, bug10957)
   end
 
   private

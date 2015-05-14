@@ -3,6 +3,12 @@ require "open3"
 require "timeout"
 require_relative "find_executable"
 
+def File.mkfifo(fn)
+  raise NotImplementedError, "does not support fifo" if /mswin|mingw|bccwin/ =~ RUBY_PLATFORM
+  ret = system("mkfifo", fn)
+  raise NotImplementedError, "mkfifo fails" if !ret
+end
+
 module EnvUtil
   def rubybin
     if ruby = ENV["RUBY"]
@@ -30,9 +36,13 @@ module EnvUtil
 
   LANG_ENVS = %w"LANG LC_ALL LC_CTYPE"
 
+  DEFAULT_SIGNALS = Signal.list
+  DEFAULT_SIGNALS.delete("TERM") if /mswin|mingw/ =~ RUBY_PLATFORM
+
   def invoke_ruby(args, stdin_data = "", capture_stdout = false, capture_stderr = false,
-                  encoding: nil, timeout: 10, reprieve: 1,
+                  encoding: nil, timeout: 10, reprieve: 1, timeout_error: Timeout::Error,
                   stdout_filter: nil, stderr_filter: nil,
+                  signal: :TERM,
                   rubybin: EnvUtil.rubybin,
                   **opt)
     in_c, in_p = IO.pipe
@@ -63,37 +73,46 @@ module EnvUtil
       th_stderr = Thread.new { err_p.read } if capture_stderr && capture_stderr != :merge_to_stdout
       in_p.write stdin_data.to_str unless stdin_data.empty?
       in_p.close
-      if (!th_stdout || th_stdout.join(timeout)) && (!th_stderr || th_stderr.join(timeout))
-        stdout = th_stdout.value if capture_stdout
-        stderr = th_stderr.value if capture_stderr && capture_stderr != :merge_to_stdout
-      else
-        signal = /mswin|mingw/ =~ RUBY_PLATFORM ? :KILL : :TERM
+      unless (!th_stdout || th_stdout.join(timeout)) && (!th_stderr || th_stderr.join(timeout))
+        signals = Array(signal).select do |sig|
+          DEFAULT_SIGNALS[sig.to_s] or
+            DEFAULT_SIGNALS[Signal.signame(sig)] rescue false
+        end
+        signals |= [:KILL]
         case pgroup = opt[:pgroup]
         when 0, true
           pgroup = -pid
         when nil, false
           pgroup = pid
         end
-        begin
-          Process.kill signal, pgroup
-          Timeout.timeout((reprieve unless signal == :KILL)) do
-            Process.wait(pid)
+        while signal = signals.shift
+          begin
+            Process.kill signal, pgroup
+          rescue Errno::EINVAL
+            next
+          rescue Errno::ESRCH
+            break
           end
-        rescue Errno::ESRCH
-          break
-        rescue Timeout::Error
-          raise if signal == :KILL
-          signal = :KILL
-        else
-          break
-        end while true
-        bt = caller_locations
-        raise Timeout::Error, "execution of #{bt.shift.label} expired", bt.map(&:to_s)
+          if signals.empty? or !reprieve
+            Process.wait(pid)
+          else
+            begin
+              Timeout.timeout(reprieve) {Process.wait(pid)}
+            rescue Timeout::Error
+            end
+          end
+        end
+        if timeout_error
+          bt = caller_locations
+          raise timeout_error, "execution of #{bt.shift.label} expired", bt.map(&:to_s)
+        end
+        status = $?
       end
+      stdout = th_stdout.value if capture_stdout
+      stderr = th_stderr.value if capture_stderr && capture_stderr != :merge_to_stdout
       out_p.close if capture_stdout
       err_p.close if capture_stderr && capture_stderr != :merge_to_stdout
-      Process.wait pid
-      status = $?
+      status ||= Process.wait2(pid)[1]
       stdout = stdout_filter.call(stdout) if stdout_filter
       stderr = stderr_filter.call(stderr) if stderr_filter
       return stdout, stderr, status
@@ -196,7 +215,7 @@ module EnvUtil
     DIAGNOSTIC_REPORTS_PATH = File.expand_path("~/Library/Logs/DiagnosticReports")
     DIAGNOSTIC_REPORTS_TIMEFORMAT = '%Y-%m-%d-%H%M%S'
     def self.diagnostic_reports(signame, cmd, pid, now)
-      return unless %w[ABRT QUIT SEGV ILL].include?(signame)
+      return unless %w[ABRT QUIT SEGV ILL TRAP].include?(signame)
       cmd = File.basename(cmd)
       path = DIAGNOSTIC_REPORTS_PATH
       timeformat = DIAGNOSTIC_REPORTS_TIMEFORMAT
@@ -318,7 +337,6 @@ module Test
       def assert_in_out_err(args, test_stdin = "", test_stdout = [], test_stderr = [], message = nil, **opt)
         stdout, stderr, status = EnvUtil.invoke_ruby(args, test_stdin, true, true, **opt)
         if signo = status.termsig
-          sleep 0.1
           EnvUtil.diagnostic_reports(Signal.signame(signo), EnvUtil.rubybin, status.pid, Time.now)
         end
         if block_given?
@@ -331,8 +349,10 @@ module Test
             begin
               if exp.is_a?(Regexp)
                 assert_match(exp, act, message)
-              else
+              elsif exp.all? {|e| String === e}
                 assert_equal(exp, act.lines.map {|l| l.chomp }, message)
+              else
+                assert_pattern_list(exp, act, message)
               end
             rescue MiniTest::Assertion => e
               errs << e.message
@@ -373,7 +393,7 @@ module Test
 eom
         args = args.dup
         args.insert((Hash === args.first ? 1 : 0), "--disable=gems", *$:.map {|l| "-I#{l}"})
-        stdout, stderr, status = EnvUtil.invoke_ruby(args, src, true, true, **opt)
+        stdout, stderr, status = EnvUtil.invoke_ruby(args, src, true, true, timeout_error: nil, **opt)
         abort = status.coredump? || (status.signaled? && ABORT_SIGNALS.include?(status.termsig))
         assert(!abort, FailDesc[status, nil, stderr])
         self._assertions += stdout[/^assertions=(\d+)/, 1].to_i

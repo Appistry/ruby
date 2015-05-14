@@ -448,11 +448,12 @@ enum ruby_value_type {
     RUBY_T_FALSE  = 0x13,
     RUBY_T_SYMBOL = 0x14,
     RUBY_T_FIXNUM = 0x15,
+    RUBY_T_UNDEF  = 0x16,
 
-    RUBY_T_UNDEF  = 0x1b,
-    RUBY_T_NODE   = 0x1c,
-    RUBY_T_ICLASS = 0x1d,
-    RUBY_T_ZOMBIE = 0x1e,
+    RUBY_T_IMEMO  = 0x1a,
+    RUBY_T_NODE   = 0x1b,
+    RUBY_T_ICLASS = 0x1c,
+    RUBY_T_ZOMBIE = 0x1d,
 
     RUBY_T_MASK   = 0x1f
 };
@@ -479,6 +480,7 @@ enum ruby_value_type {
 #define T_SYMBOL RUBY_T_SYMBOL
 #define T_RATIONAL RUBY_T_RATIONAL
 #define T_COMPLEX RUBY_T_COMPLEX
+#define T_IMEMO  RUBY_T_IMEMO
 #define T_UNDEF  RUBY_T_UNDEF
 #define T_NODE   RUBY_T_NODE
 #define T_ZOMBIE RUBY_T_ZOMBIE
@@ -816,7 +818,7 @@ struct RClass {
     struct RBasic basic;
     VALUE super;
     rb_classext_t *ptr;
-    struct method_table_wrapper *m_tbl_wrapper;
+    struct st_table *m_tbl;
 };
 #define RCLASS_SUPER(c) rb_class_get_superclass(c)
 #define RMODULE_IV_TBL(m) RCLASS_IV_TBL(m)
@@ -1009,7 +1011,9 @@ typedef void (*RUBY_DATA_FUNC)(void*);
 # endif
 #endif
 VALUE rb_data_object_alloc(VALUE,void*,RUBY_DATA_FUNC,RUBY_DATA_FUNC);
+VALUE rb_data_object_zalloc(VALUE,size_t,RUBY_DATA_FUNC,RUBY_DATA_FUNC);
 VALUE rb_data_typed_object_alloc(VALUE klass, void *datap, const rb_data_type_t *);
+VALUE rb_data_typed_object_zalloc(VALUE klass, size_t size, const rb_data_type_t *type);
 int rb_typeddata_inherited_p(const rb_data_type_t *child, const rb_data_type_t *parent);
 int rb_typeddata_is_kind_of(VALUE, const rb_data_type_t *);
 void *rb_check_typeddata(VALUE, const rb_data_type_t *);
@@ -1027,18 +1031,38 @@ void *rb_check_typeddata(VALUE, const rb_data_type_t *);
 #define Data_Wrap_Struct(klass,mark,free,sval)\
     rb_data_object_alloc((klass),(sval),(RUBY_DATA_FUNC)(mark),(RUBY_DATA_FUNC)(free))
 
+#define Data_Make_Struct0(result, klass, size, mark, free, sval) \
+    VALUE result = rb_data_object_zalloc(klass, size, mark, free); \
+    (void)((sval) = DATA_PTR(result));
+
+#ifdef __GNUC__
+#define Data_Make_Struct(klass,type,mark,free,sval) ({\
+    Data_Make_Struct0(data_struct_obj, klass, sizeof(type), mark, free, sval); \
+    data_struct_obj; \
+})
+#else
 #define Data_Make_Struct(klass,type,mark,free,sval) (\
-    (sval) = ZALLOC(type),\
-    Data_Wrap_Struct((klass),(mark),(free),(sval))\
+    rb_data_struct_make((klass),(RUBY_DATA_FUNC)(mark),(RUBY_DATA_FUNC)(free),(void **)&(sval),sizeof(type)) \
 )
+#endif
 
 #define TypedData_Wrap_Struct(klass,data_type,sval)\
   rb_data_typed_object_alloc((klass),(sval),(data_type))
 
+#define TypedData_Make_Struct0(result, klass, size, data_type, sval) \
+    VALUE result = rb_data_typed_object_zalloc(klass, size, data_type); \
+    (void)((sval) = DATA_PTR(result));
+
+#ifdef __GNUC__
+#define TypedData_Make_Struct(klass, type, data_type, sval) ({\
+    TypedData_Make_Struct0(data_struct_obj, klass, sizeof(type), data_type, sval); \
+    data_struct_obj; \
+})
+#else
 #define TypedData_Make_Struct(klass, type, data_type, sval) (\
-    (sval) = ZALLOC(type),\
-    TypedData_Wrap_Struct((klass),(data_type),(sval))\
+    rb_data_typed_struct_make((klass),(data_type),(void **)&(sval),sizeof(type)) \
 )
+#endif
 
 #define Data_Get_Struct(obj,type,sval) \
     ((sval) = (type*)rb_data_object_get(obj))
@@ -1167,7 +1191,9 @@ rb_obj_freeze_inline(VALUE x)
 # define RUBY_UNTYPED_DATA_FUNC(func) DEPRECATED(func)
 #endif
 
+#if defined(HAVE_BUILTIN___BUILTIN_CHOOSE_EXPR_CONSTANT_P)
 RUBY_UNTYPED_DATA_FUNC(static inline VALUE rb_data_object_alloc_warning(VALUE,void*,RUBY_DATA_FUNC,RUBY_DATA_FUNC));
+#endif
 RUBY_UNTYPED_DATA_FUNC(static inline void *rb_data_object_get_warning(VALUE));
 
 static inline VALUE
@@ -1198,24 +1224,36 @@ rb_data_object_get_warning(VALUE obj)
     return rb_data_object_get(obj);
 }
 
+static inline VALUE
+rb_data_struct_make(VALUE klass, RUBY_DATA_FUNC mark_func, RUBY_DATA_FUNC free_func, void **datap, size_t size)
+{
+    Data_Make_Struct0(result, klass, size, mark_func, free_func, *datap);
+    return result;
+}
+
+static inline VALUE
+rb_data_typed_struct_make(VALUE klass, const rb_data_type_t *type, void **datap, size_t size)
+{
+    TypedData_Make_Struct0(result, klass, size, type, *datap);
+    return result;
+}
+
 #define rb_data_object_alloc_0 rb_data_object_alloc
 #define rb_data_object_alloc_1 rb_data_object_alloc_warning
 #define rb_data_object_alloc  RUBY_MACRO_SELECT(rb_data_object_alloc_, RUBY_UNTYPED_DATA_WARNING)
 #define rb_data_object_get_0 rb_data_object_get
 #define rb_data_object_get_1 rb_data_object_get_warning
 #define rb_data_object_get  RUBY_MACRO_SELECT(rb_data_object_get_, RUBY_UNTYPED_DATA_WARNING)
+#define rb_data_struct_make_0 rb_data_struct_make
+#define rb_data_struct_make_1 rb_data_struct_make_warning
+#define rb_data_struct_make   RUBY_MACRO_SELECT(rb_data_struct_make_, RUBY_UNTYPED_DATA_WARNING)
 
 #if USE_RGENGC
 #define OBJ_PROMOTED_RAW(x)         ((RBASIC(x)->flags & (FL_PROMOTED0|FL_PROMOTED1)) == (FL_PROMOTED0|FL_PROMOTED1))
 #define OBJ_PROMOTED(x)             (SPECIAL_CONST_P(x) ? 0 : OBJ_PROMOTED_RAW(x))
 #define OBJ_WB_UNPROTECT(x)         rb_obj_wb_unprotect(x, __FILE__, __LINE__)
 
-#if USE_RINCGC
-int rb_gc_writebarrier_incremental(VALUE a, VALUE b);
-#else
-#define rb_gc_writebarrier_incremental(a, b) 0
-#endif
-void rb_gc_writebarrier_generational(VALUE a, VALUE b);
+void rb_gc_writebarrier(VALUE a, VALUE b);
 void rb_gc_writebarrier_unprotect(VALUE obj);
 
 #else /* USE_RGENGC */
@@ -1267,11 +1305,7 @@ rb_obj_written(VALUE a, RB_UNUSED_VAR(VALUE oldv), VALUE b, RB_UNUSED_VAR(const 
 
 #if USE_RGENGC
     if (!SPECIAL_CONST_P(b)) {
-	if (rb_gc_writebarrier_incremental(a, b) == 0) {
-	    if (OBJ_PROMOTED_RAW(a) && !OBJ_PROMOTED_RAW(b)) {
-		rb_gc_writebarrier_generational(a, b);
-	    }
-	}
+	rb_gc_writebarrier(a, b);
     }
 #endif
 

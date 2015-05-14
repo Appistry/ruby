@@ -1,11 +1,12 @@
 # -*- ruby -*-
-_VERSION = "1.2.6"
+_VERSION = "1.2.7"
 date = %w$Date::                           $[1]
 
 Gem::Specification.new do |s|
   s.name = "bigdecimal"
   s.version = _VERSION
   s.date = date
+  s.license = 'ruby'
   s.summary = "Arbitrary-precision decimal floating-point number library."
   s.homepage = "http://www.ruby-lang.org"
   s.email = "mrkn@mrkn.jp"
@@ -16,7 +17,6 @@ Gem::Specification.new do |s|
     bigdecimal.gemspec
     bigdecimal.c
     bigdecimal.h
-    README
     depend extconf.rb
     lib/bigdecimal/jacobian.rb
     lib/bigdecimal/ludcmp.rb

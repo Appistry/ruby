@@ -238,22 +238,26 @@ class TestObject < Test::Unit::TestCase
     assert_equal(false, o.instance_variable_defined?(:@foo))
   end
 
-  def test_convert_type
+  def test_convert_string
     o = Object.new
     def o.to_s; 1; end
     assert_raise(TypeError) { String(o) }
     def o.to_s; "o"; end
     assert_equal("o", String(o))
+    def o.to_str; "O"; end
+    assert_equal("O", String(o))
     def o.respond_to?(*) false; end
     assert_raise(TypeError) { String(o) }
   end
 
-  def test_check_convert_type
+  def test_convert_array
     o = Object.new
     def o.to_a; 1; end
     assert_raise(TypeError) { Array(o) }
     def o.to_a; [1]; end
     assert_equal([1], Array(o))
+    def o.to_ary; [2]; end
+    assert_equal([2], Array(o))
     def o.respond_to?(*) false; end
     assert_equal([o], Array(o))
   end

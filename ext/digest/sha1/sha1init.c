@@ -2,8 +2,10 @@
 /* $Id$ */
 
 #include "digest.h"
-#if defined(HAVE_OPENSSL_SHA_H)
+#if defined(SHA1_USE_OPENSSL)
 #include "sha1ossl.h"
+#elif defined(SHA1_USE_COMMONDIGEST)
+#include "sha1cc.h"
 #else
 #include "sha1.h"
 #endif
@@ -40,6 +42,6 @@ Init_sha1(void)
 
 #undef RUBY_UNTYPED_DATA_WARNING
 #define RUBY_UNTYPED_DATA_WARNING 0
-    rb_ivar_set(cDigest_SHA1, rb_intern("metadata"),
-		Data_Wrap_Struct(0, 0, 0, (void *)&sha1));
+    rb_iv_set(cDigest_SHA1, "metadata",
+	      Data_Wrap_Struct(0, 0, 0, (void *)&sha1));
 }

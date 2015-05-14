@@ -32,7 +32,7 @@ module Psych
         return result if @domain_types.empty? || !target.tag
 
         key = target.tag.sub(/^[!\/]*/, '').sub(/(,\d+)\//, '\1:')
-        key = "tag:#{key}" unless key =~ /^(tag:|x-private)/
+        key = "tag:#{key}" unless key =~ /^(?:tag:|x-private)/
 
         if @domain_types.key? key
           value, block = @domain_types[key]
@@ -89,7 +89,7 @@ module Psych
           Float(@ss.tokenize(o.value))
         when "!ruby/regexp"
           klass = class_loader.regexp
-          o.value =~ /^\/(.*)\/([mixn]*)$/
+          o.value =~ /^\/(.*)\/([mixn]*)$/m
           source  = $1
           options = 0
           lang    = nil
@@ -261,8 +261,23 @@ module Psych
           end
           set
 
+        when /^!ruby\/hash-with-ivars(?::(.*))?$/
+          hash = $1 ? resolve_class($1).allocate : {}
+          register o, hash
+          o.children.each_slice(2) do |key, value|
+            case key.value
+            when 'elements'
+              revive_hash hash, value
+            when 'ivars'
+              value.children.each_slice(2) do |k,v|
+                hash.instance_variable_set accept(k), accept(v)
+              end
+            end
+          end
+          hash
+
         when /^!map:(.*)$/, /^!ruby\/hash:(.*)$/
-          revive_hash register(o, resolve_class($1).new), o
+          revive_hash register(o, resolve_class($1).allocate), o
 
         when '!omap', 'tag:yaml.org,2002:omap'
           map = register(o, class_loader.psych_omap.new)

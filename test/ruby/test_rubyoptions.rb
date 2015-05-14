@@ -85,8 +85,8 @@ class TestRubyOptions < Test::Unit::TestCase
 
   def test_verbose
     assert_in_out_err(["-vve", ""]) do |r, e|
-      assert_match(/^ruby #{RUBY_VERSION}(?:[p ]|dev|rc).*? \[#{RUBY_PLATFORM}\]$/, r.join)
-      assert_equal RUBY_DESCRIPTION, r.join.chomp
+      assert_match(/^ruby #{RUBY_VERSION}(?:[p ]|dev|rc).*? \[#{RUBY_PLATFORM}\]$/, r[0])
+      assert_equal(RUBY_DESCRIPTION, r[0])
       assert_equal([], e)
     end
 
@@ -139,8 +139,8 @@ class TestRubyOptions < Test::Unit::TestCase
 
   def test_version
     assert_in_out_err(%w(--version)) do |r, e|
-      assert_match(/^ruby #{RUBY_VERSION}(?:[p ]|dev|rc).*? \[#{RUBY_PLATFORM}\]$/, r.join)
-      assert_equal RUBY_DESCRIPTION, r.join.chomp
+      assert_match(/^ruby #{RUBY_VERSION}(?:[p ]|dev|rc).*? \[#{RUBY_PLATFORM}\]$/, r[0])
+      assert_equal(RUBY_DESCRIPTION, r[0])
       assert_equal([], e)
     end
   end
@@ -552,18 +552,9 @@ class TestRubyOptions < Test::Unit::TestCase
   def assert_segv(args, message=nil)
     test_stdin = ""
     opt = SEGVTest::ExecOptions.dup
+    list = SEGVTest::ExpectedStderrList
 
-    _, stderr, status = EnvUtil.invoke_ruby(args, test_stdin, false, true, **opt)
-    stderr.force_encoding("ASCII-8BIT")
-
-    if signo = status.termsig
-      sleep 0.1
-      EnvUtil.diagnostic_reports(Signal.signame(signo), EnvUtil.rubybin, status.pid, Time.now)
-    end
-
-    assert_pattern_list(SEGVTest::ExpectedStderrList, stderr, message)
-
-    status
+    assert_in_out_err(args, test_stdin, //, list, encoding: "ASCII-8BIT", **opt)
   end
 
   def test_segv_test
@@ -571,26 +562,14 @@ class TestRubyOptions < Test::Unit::TestCase
   end
 
   def test_segv_loaded_features
-    opts = SEGVTest::ExecOptions.dup
-
     bug7402 = '[ruby-core:49573]'
 
-    status = Dir.mktmpdir("segv_test") do |tmpdir|
-      assert_in_out_err(['-e', 'class Bogus; def to_str; exit true; end; end',
-                         '-e', '$".clear',
-                         '-e', '$".unshift Bogus.new',
-                         '-e', '(p $"; abort) unless $".size == 1',
-                         '-e', 'Process.kill :SEGV, $$',
-                         '-C', tmpdir,
-                        ],
-                        "", [], //,
-                        nil,
-                        opts)
-    end
-    if signo = status.termsig
-      sleep 0.1
-      EnvUtil.diagnostic_reports(Signal.signame(signo), EnvUtil.rubybin, status.pid, Time.now)
-    end
+    status = assert_segv(['-e', 'END {Process.kill :SEGV, $$}',
+                          '-e', 'class Bogus; def to_str; exit true; end; end',
+                          '-e', '$".clear',
+                          '-e', '$".unshift Bogus.new',
+                          '-e', '(p $"; abort) unless $".size == 1',
+                         ])
     assert_not_predicate(status, :success?, "segv but success #{bug7402}")
   end
 
@@ -725,6 +704,14 @@ class TestRubyOptions < Test::Unit::TestCase
         open(name, "w") {|f| f.puts "puts File.basename($0)"}
         assert_in_out_err([name], "", [expected], [],
                           bug10555, encoding: "locale")
+      end
+    end
+
+    def test_command_line_glob_with_dir
+      bug10941 = '[ruby-core:68430] [Bug #10941]'
+      with_tmpchdir do |dir|
+        Dir.mkdir('test')
+        assert_in_out_err(["-e", "", "test/*"], "", [], [], bug10941)
       end
     end
   end

@@ -1,13 +1,10 @@
 require 'test/unit'
 
-# to supress warnings for future calls of Module#refine
-EnvUtil.suppress_warning do
-  Module.new {
-    refine(Object) {}
-  }
-end
-
 class TestRefinement < Test::Unit::TestCase
+  module Sandbox
+    BINDING = binding
+  end
+
   class Foo
     def x
       return "Foo#x"
@@ -72,7 +69,7 @@ class TestRefinement < Test::Unit::TestCase
     end
   end
 
-  eval <<-EOF, TOPLEVEL_BINDING
+  eval <<-EOF, Sandbox::BINDING
     using TestRefinement::FooExt
 
     class TestRefinement::FooExtClient
@@ -102,7 +99,7 @@ class TestRefinement < Test::Unit::TestCase
     end
   EOF
 
-  eval <<-EOF, TOPLEVEL_BINDING
+  eval <<-EOF, Sandbox::BINDING
     using TestRefinement::FooExt
     using TestRefinement::FooExt2
 
@@ -418,7 +415,7 @@ class TestRefinement < Test::Unit::TestCase
 
   def test_main_using_is_private
     assert_raise(NoMethodError) do
-      eval("self.using Module.new", TOPLEVEL_BINDING)
+      eval("self.using Module.new", Sandbox::BINDING)
     end
   end
 
@@ -433,7 +430,7 @@ class TestRefinement < Test::Unit::TestCase
 
   def test_module_using_class
     assert_raise(TypeError) do
-      eval("using TestRefinement::UsingClass", TOPLEVEL_BINDING)
+      eval("using TestRefinement::UsingClass", Sandbox::BINDING)
     end
   end
 
@@ -594,7 +591,7 @@ class TestRefinement < Test::Unit::TestCase
 
   def test_using_in_module
     assert_raise(RuntimeError) do
-      eval(<<-EOF, TOPLEVEL_BINDING)
+      eval(<<-EOF, Sandbox::BINDING)
         $main = self
         module M
         end
@@ -607,14 +604,16 @@ class TestRefinement < Test::Unit::TestCase
 
   def test_using_in_method
     assert_raise(RuntimeError) do
-      eval(<<-EOF, TOPLEVEL_BINDING)
+      eval(<<-EOF, Sandbox::BINDING)
         $main = self
         module M
         end
-        def call_using_in_method
-          $main.send(:using, M)
+        class C
+          def call_using_in_method
+            $main.send(:using, M)
+          end
         end
-        call_using_in_method
+        C.new.call_using_in_method
       EOF
     end
   end
@@ -655,7 +654,7 @@ class TestRefinement < Test::Unit::TestCase
     end
   end
 
-  eval <<-EOF, TOPLEVEL_BINDING
+  eval <<-EOF, Sandbox::BINDING
     using TestRefinement::IncludeIntoRefinement::M
 
     module TestRefinement::IncludeIntoRefinement::User
@@ -718,7 +717,7 @@ class TestRefinement < Test::Unit::TestCase
     end
   end
 
-  eval <<-EOF, TOPLEVEL_BINDING
+  eval <<-EOF, Sandbox::BINDING
     using TestRefinement::PrependIntoRefinement::M
 
     module TestRefinement::PrependIntoRefinement::User
@@ -864,7 +863,7 @@ class TestRefinement < Test::Unit::TestCase
 
   def test_module_using_invalid_self
     assert_raise(RuntimeError) do
-      eval <<-EOF, TOPLEVEL_BINDING
+      eval <<-EOF, Sandbox::BINDING
         module TestRefinement::TestModuleUsingInvalidSelf
           Module.new.send(:using, TestRefinement::FooExt)
         end
@@ -943,7 +942,7 @@ class TestRefinement < Test::Unit::TestCase
   end
 
   def test_eval_with_binding_scoping
-    assert_in_out_err([], <<-INPUT, ["HELLO WORLD", "dlrow olleh", "HELLO WORLD"], [])
+    assert_in_out_err([], <<-INPUT, ["HELLO WORLD", "dlrow olleh", "dlrow olleh"], [])
       module M
         refine String do
           def upcase
@@ -953,8 +952,9 @@ class TestRefinement < Test::Unit::TestCase
       end
 
       puts "hello world".upcase
-      puts eval(%{using M; "hello world".upcase}, TOPLEVEL_BINDING)
-      puts eval(%{"hello world".upcase}, TOPLEVEL_BINDING)
+      b = binding
+      puts eval(%{using M; "hello world".upcase}, b)
+      puts eval(%{"hello world".upcase}, b)
     INPUT
   end
 
@@ -1163,11 +1163,301 @@ class TestRefinement < Test::Unit::TestCase
 
     assert_raise(NoMethodError, bug10106) {Object.new.foo}
     end;
+
+    assert_separately([], <<-"end;")
+    bug10707 = '[ruby-core:67389] [Bug #10707]'
+    module RefinementBug
+      refine BasicObject do
+        def foo
+        end
+      end
+    end
+
+    assert(methods, bug10707)
+    assert_raise(NameError, bug10707) {method(:foo)}
+    end;
+  end
+
+  def test_change_refined_new_method_visibility
+    assert_separately([], <<-"end;")
+    bug10706 = '[ruby-core:67387] [Bug #10706]'
+    module RefinementBug
+      refine Object do
+        def foo
+        end
+      end
+    end
+
+    assert_raise(NameError, bug10706) {private(:foo)}
+    end;
+  end
+
+  def test_alias_refined_method
+    assert_separately([], <<-"end;")
+    bug10731 = '[ruby-core:67523] [Bug #10731]'
+
+    class C
+    end
+
+    module RefinementBug
+      refine C do
+        def foo
+        end
+
+        def bar
+        end
+      end
+    end
+
+    assert_raise(NameError, bug10731) do
+      class C
+        alias foo bar
+      end
+    end
+    end;
+  end
+
+  def test_singleton_method_should_not_use_refinements
+    assert_separately([], <<-"end;")
+    bug10744 = '[ruby-core:67603] [Bug #10744]'
+
+    class C
+    end
+
+    module RefinementBug
+      refine C.singleton_class do
+        def foo
+        end
+      end
+    end
+
+    assert_raise(NameError, bug10744) { C.singleton_method(:foo) }
+    end;
+  end
+
+  def test_refined_method_defined
+    assert_separately([], <<-"end;")
+    bug10753 = '[ruby-core:67656] [Bug #10753]'
+
+    c = Class.new do
+      def refined_public; end
+      def refined_protected; end
+      def refined_private; end
+
+      public :refined_public
+      protected :refined_protected
+      private :refined_private
+    end
+
+    m = Module.new do
+      refine(c) do
+        def refined_public; end
+        def refined_protected; end
+        def refined_private; end
+
+        public :refined_public
+        protected :refined_protected
+        private :refined_private
+      end
+    end
+
+    using m
+
+    assert_equal(true, c.public_method_defined?(:refined_public), bug10753)
+    assert_equal(false, c.public_method_defined?(:refined_protected), bug10753)
+    assert_equal(false, c.public_method_defined?(:refined_private), bug10753)
+
+    assert_equal(false, c.protected_method_defined?(:refined_public), bug10753)
+    assert_equal(true, c.protected_method_defined?(:refined_protected), bug10753)
+    assert_equal(false, c.protected_method_defined?(:refined_private), bug10753)
+
+    assert_equal(false, c.private_method_defined?(:refined_public), bug10753)
+    assert_equal(false, c.private_method_defined?(:refined_protected), bug10753)
+    assert_equal(true, c.private_method_defined?(:refined_private), bug10753)
+    end;
+  end
+
+  def test_undefined_refined_method_defined
+    assert_separately([], <<-"end;")
+    bug10753 = '[ruby-core:67656] [Bug #10753]'
+
+    c = Class.new
+
+    m = Module.new do
+      refine(c) do
+        def undefined_refined_public; end
+        def undefined_refined_protected; end
+        def undefined_refined_private; end
+        public :undefined_refined_public
+        protected :undefined_refined_protected
+        private :undefined_refined_private
+      end
+    end
+
+    using m
+
+    assert_equal(false, c.public_method_defined?(:undefined_refined_public), bug10753)
+    assert_equal(false, c.public_method_defined?(:undefined_refined_protected), bug10753)
+    assert_equal(false, c.public_method_defined?(:undefined_refined_private), bug10753)
+
+    assert_equal(false, c.protected_method_defined?(:undefined_refined_public), bug10753)
+    assert_equal(false, c.protected_method_defined?(:undefined_refined_protected), bug10753)
+    assert_equal(false, c.protected_method_defined?(:undefined_refined_private), bug10753)
+
+    assert_equal(false, c.private_method_defined?(:undefined_refined_public), bug10753)
+    assert_equal(false, c.private_method_defined?(:undefined_refined_protected), bug10753)
+    assert_equal(false, c.private_method_defined?(:undefined_refined_private), bug10753)
+    end;
+  end
+
+  def test_remove_refined_method
+    assert_separately([], <<-"end;")
+    bug10765 = '[ruby-core:67722] [Bug #10765]'
+
+    class C
+      def foo
+        "C#foo"
+      end
+    end
+
+    module RefinementBug
+      refine C do
+        def foo
+          "RefinementBug#foo"
+        end
+      end
+    end
+
+    using RefinementBug
+
+    class C
+      remove_method :foo
+    end
+
+    assert_equal("RefinementBug#foo", C.new.foo, bug10765)
+    end;
+  end
+
+  def test_remove_undefined_refined_method
+    assert_separately([], <<-"end;")
+    bug10765 = '[ruby-core:67722] [Bug #10765]'
+
+    class C
+    end
+
+    module RefinementBug
+      refine C do
+        def foo
+        end
+      end
+    end
+
+    using RefinementBug
+
+    assert_raise(NameError, bug10765) {
+      class C
+        remove_method :foo
+      end
+    }
+    end;
+  end
+
+  module NotIncludeSuperclassMethod
+    class X
+      def foo
+      end
+    end
+
+    class Y < X
+    end
+
+    module Bar
+      refine Y do
+        def foo
+        end
+      end
+    end
+  end
+
+  def test_instance_methods_not_include_superclass_method
+    bug10826 = '[ruby-dev:48854] [Bug #10826]'
+    assert_not_include(NotIncludeSuperclassMethod::Y.instance_methods(false),
+                       :foo, bug10826)
+    assert_include(NotIncludeSuperclassMethod::Y.instance_methods(true),
+                   :foo, bug10826)
+  end
+
+  def test_undef_original_method
+    assert_in_out_err([], <<-INPUT, ["NoMethodError"], [])
+      module NoPlus
+        refine String do
+          undef +
+        end
+      end
+
+      using NoPlus
+      "a" + "b" rescue p($!.class)
+    INPUT
+  end
+
+  def test_call_refined_method_in_duplicate_module
+    bug10885 = '[ruby-dev:48878]'
+    assert_in_out_err([], <<-INPUT, [], [], bug10885)
+      module M
+        refine Object do
+          def raise
+            # do nothing
+          end
+        end
+
+        class << self
+          using M
+          def m0
+            raise
+          end
+        end
+
+        using M
+        def M.m1
+          raise
+        end
+      end
+
+      M.dup.m0
+      M.dup.m1
+    INPUT
+  end
+
+  def test_check_funcall_undefined
+    bug11117 = '[ruby-core:69064] [Bug #11117]'
+
+    x = Class.new
+    Module.new do
+      refine x do
+        def to_regexp
+          //
+        end
+      end
+    end
+
+    assert_nothing_raised(NoMethodError, bug11117) {
+      assert_nil(Regexp.try_convert(x.new))
+    }
+  end
+
+  def test_funcall_inherited
+    bug11117 = '[ruby-core:69064] [Bug #11117]'
+
+    Module.new {refine(Dir) {def to_s; end}}
+    x = Class.new(Dir).allocate
+    assert_nothing_raised(NoMethodError, bug11117) {
+      x.inspect
+    }
   end
 
   private
 
   def eval_using(mod, s)
-    eval("using #{mod}; #{s}", TOPLEVEL_BINDING)
+    eval("using #{mod}; #{s}", Sandbox::BINDING)
   end
 end

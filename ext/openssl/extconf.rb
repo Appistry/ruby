@@ -8,7 +8,7 @@
   All rights reserved.
 
 = Licence
-  This program is licenced under the same licence as Ruby.
+  This program is licensed under the same licence as Ruby.
   (See the file 'LICENCE'.)
 
 = Version
@@ -87,6 +87,7 @@ have_func("HMAC_CTX_init")
 have_func("PEM_def_callback")
 have_func("PKCS5_PBKDF2_HMAC")
 have_func("PKCS5_PBKDF2_HMAC_SHA1")
+have_func("RAND_egd")
 have_func("X509V3_set_nconf")
 have_func("X509V3_EXT_nconf_nid")
 have_func("X509_CRL_add0_revoked")

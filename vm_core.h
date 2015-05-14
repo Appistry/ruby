@@ -117,6 +117,7 @@ typedef struct rb_compile_option_struct rb_compile_option_t;
 
 struct iseq_inline_cache_entry {
     rb_serial_t ic_serial;
+    rb_cref_t *ic_cref;
     union {
 	size_t index;
 	VALUE value;
@@ -137,7 +138,7 @@ struct rb_control_frame_struct;
 
 typedef struct rb_call_info_kw_arg_struct {
     int keyword_len;
-    ID keywords[1];
+    VALUE keywords[1];
 } rb_call_info_kw_arg_t;
 
 /* rb_call_info_t contains calling information including inline cache */
@@ -322,17 +323,6 @@ struct rb_iseq_struct {
 
     VALUE self;
     const VALUE orig;			/* non-NULL if its data have origin */
-
-    /* block inlining */
-    /*
-     * NODE *node;
-     * void *special_block_builder;
-     * void *cached_special_block_builder;
-     * VALUE cached_special_block;
-     */
-
-    /* klass/module nest information stack (cref) */
-    NODE * const cref_stack;
     const VALUE klass;
 
     /* misc */
@@ -416,7 +406,6 @@ typedef struct rb_vm_struct {
 
     /* object management */
     VALUE mark_object_ary;
-
     const VALUE special_exceptions[ruby_special_error_count];
 
     /* load */
@@ -642,7 +631,6 @@ typedef struct rb_thread_struct {
     enum rb_thread_status status;
     int to_kill;
     int priority;
-    int mark_stack_len;
 
     native_thread_data_t native_thread_data;
     void *blocking_region_buffer;
@@ -838,6 +826,14 @@ enum vm_special_object_type {
     VM_SPECIAL_OBJECT_CONST_BASE
 };
 
+enum vm_svar_index {
+    VM_SVAR_LASTLINE = 0,      /* $_ */
+    VM_SVAR_BACKREF = 1,       /* $~ */
+
+    VM_SVAR_EXTRA_START = 2,
+    VM_SVAR_FLIPFLOP_START = 2 /* flipflop */
+};
+
 #define VM_FRAME_MAGIC_METHOD 0x11
 #define VM_FRAME_MAGIC_BLOCK  0x21
 #define VM_FRAME_MAGIC_CLASS  0x31
@@ -902,7 +898,7 @@ typedef rb_control_frame_t *
 #define VM_EP_LEP_P(ep)     VM_ENVVAL_BLOCK_PTR_P((ep)[0])
 
 VALUE *rb_vm_ep_local_ep(VALUE *ep);
-rb_block_t *rb_vm_control_frame_block_ptr(rb_control_frame_t *cfp);
+rb_block_t *rb_vm_control_frame_block_ptr(const rb_control_frame_t *cfp);
 
 #define RUBY_VM_PREVIOUS_CONTROL_FRAME(cfp) ((cfp)+1)
 #define RUBY_VM_NEXT_CONTROL_FRAME(cfp) ((cfp)-1)
@@ -913,7 +909,7 @@ rb_block_t *rb_vm_control_frame_block_ptr(rb_control_frame_t *cfp);
 #define RUBY_VM_CONTROL_FRAME_STACK_OVERFLOW_P(th, cfp) \
   (!RUBY_VM_VALID_CONTROL_FRAME_P((cfp), RUBY_VM_END_CONTROL_FRAME(th)))
 
-#define RUBY_VM_IFUNC_P(ptr)        (BUILTIN_TYPE(ptr) == T_NODE)
+#define RUBY_VM_IFUNC_P(ptr)        RB_TYPE_P((VALUE)(ptr), T_IMEMO)
 #define RUBY_VM_NORMAL_ISEQ_P(ptr) \
   ((ptr) && !RUBY_VM_IFUNC_P(ptr))
 
@@ -1003,6 +999,8 @@ void rb_gc_mark_machine_stack(rb_thread_t *th);
 
 int rb_autoloading_value(VALUE mod, ID id, VALUE* value);
 
+void rb_vm_rewrite_cref_stack(rb_cref_t *node, VALUE old_klass, VALUE new_klass, rb_cref_t **new_cref_ptr);
+
 #define sysstack_error GET_VM()->special_exceptions[ruby_error_sysstack]
 
 #define RUBY_CONST_ASSERT(expr) (1/!!(expr)) /* expr must be a compile-time constant */
@@ -1036,8 +1034,8 @@ GET_THREAD(void)
     rb_thread_t *th = ruby_current_thread;
 #if OPT_CALL_CFUNC_WITHOUT_FRAME
     if (UNLIKELY(th->passed_ci != 0)) {
-	void vm_call_cfunc_push_frame(rb_thread_t *th);
-	vm_call_cfunc_push_frame(th);
+	void rb_vm_call_cfunc_push_frame(rb_thread_t *th);
+	rb_vm_call_cfunc_push_frame(th);
     }
 #endif
     return th;

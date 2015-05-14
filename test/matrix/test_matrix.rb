@@ -179,8 +179,11 @@ class TestMatrix < Test::Unit::TestCase
   end
 
   def test_determinant
+    assert_equal(0, Matrix[[0,0],[0,0]].determinant)
     assert_equal(45, Matrix[[7,6], [3,9]].determinant)
     assert_equal(-18, Matrix[[2,0,1],[0,-2,2],[1,2,3]].determinant)
+    assert_equal(-7, Matrix[[0,0,1],[0,7,6],[1,3,9]].determinant)
+    assert_equal(42, Matrix[[7,0,1,0,12],[8,1,1,9,1],[4,0,0,-7,17],[-1,0,0,-4,8],[10,1,1,8,6]].determinant)
   end
 
   def test_new_matrix
@@ -188,6 +191,12 @@ class TestMatrix < Test::Unit::TestCase
     o = Object.new
     def o.to_ary; [1,2,3]; end
     assert_equal(@m1, Matrix[o, [4,5,6]])
+  end
+
+  def test_round
+    a = Matrix[[1.0111, 2.32320, 3.04343], [4.81, 5.0, 6.997]]
+    b = Matrix[[1.01, 2.32, 3.04], [4.81, 5.0, 7.0]]
+    assert_equal(a.round(2), b)
   end
 
   def test_rows
@@ -411,10 +420,7 @@ class TestMatrix < Test::Unit::TestCase
   end
 
   def test_det
-    assert_equal(45, Matrix[[7,6],[3,9]].det)
-    assert_equal(0, Matrix[[0,0],[0,0]].det)
-    assert_equal(-7, Matrix[[0,0,1],[0,7,6],[1,3,9]].det)
-    assert_equal(42, Matrix[[7,0,1,0,12],[8,1,1,9,1],[4,0,0,-7,17],[-1,0,0,-4,8],[10,1,1,8,6]].det)
+    assert_equal(Matrix.instance_method(:determinant), Matrix.instance_method(:det))
   end
 
   def test_rank2

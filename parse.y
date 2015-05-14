@@ -374,6 +374,8 @@ static NODE* node_newnode(struct parser_params *, enum node_type, VALUE, VALUE, 
 
 static NODE *cond_gen(struct parser_params*,NODE*);
 #define cond(node) cond_gen(parser, (node))
+static NODE *new_if_gen(struct parser_params*,NODE*,NODE*,NODE*);
+#define new_if(cc,left,right) new_if_gen(parser, (cc), (left), (right))
 static NODE *logop_gen(struct parser_params*,enum node_type,NODE*,NODE*);
 #define logop(type,node1,node2) logop_gen(parser, (type), (node1), (node2))
 
@@ -652,7 +654,7 @@ new_args_gen(struct parser_params *parser, VALUE f, VALUE o, VALUE r, VALUE p, V
 static inline VALUE
 new_args_tail_gen(struct parser_params *parser, VALUE k, VALUE kr, VALUE b)
 {
-    return (VALUE)rb_node_newnode(NODE_MEMO, k, kr, b);
+    return (VALUE)MEMO_NEW(k, kr, b);
 }
 #define new_args_tail(k,kr,b) new_args_tail_gen(parser, (k),(kr),(b))
 
@@ -1144,7 +1146,7 @@ stmt		: keyword_alias fitem {lex_state = EXPR_FNAME;} fitem
 		| stmt modifier_if expr_value
 		    {
 		    /*%%%*/
-			$$ = NEW_IF(cond($3), remove_begin($1), 0);
+			$$ = new_if($3, remove_begin($1), 0);
 			fixpos($$, $3);
 		    /*%
 			$$ = dispatch2(if_mod, $3, $1);
@@ -2100,8 +2102,8 @@ arg		: lhs '=' arg
 			value_expr($1);
 			value_expr($3);
 			$$ = NEW_DOT2($1, $3);
-			if (nd_type($1) == NODE_LIT && FIXNUM_P($1->nd_lit) &&
-			    nd_type($3) == NODE_LIT && FIXNUM_P($3->nd_lit)) {
+			if ($1 && nd_type($1) == NODE_LIT && FIXNUM_P($1->nd_lit) &&
+			    $3 && nd_type($3) == NODE_LIT && FIXNUM_P($3->nd_lit)) {
 			    deferred_nodes = list_append(deferred_nodes, $$);
 			}
 		    /*%
@@ -2114,8 +2116,8 @@ arg		: lhs '=' arg
 			value_expr($1);
 			value_expr($3);
 			$$ = NEW_DOT3($1, $3);
-			if (nd_type($1) == NODE_LIT && FIXNUM_P($1->nd_lit) &&
-			    nd_type($3) == NODE_LIT && FIXNUM_P($3->nd_lit)) {
+			if ($1 && nd_type($1) == NODE_LIT && FIXNUM_P($1->nd_lit) &&
+			    $3 && nd_type($3) == NODE_LIT && FIXNUM_P($3->nd_lit)) {
 			    deferred_nodes = list_append(deferred_nodes, $$);
 			}
 		    /*%
@@ -2373,7 +2375,7 @@ arg		: lhs '=' arg
 		    {
 		    /*%%%*/
 			value_expr($1);
-			$$ = NEW_IF(cond($1), $4, $8);
+			$$ = new_if($1, $4, $8);
 			fixpos($$, $1);
 		    /*%
 			$$ = dispatch3(ifop, $1, $4, $8);
@@ -2405,7 +2407,7 @@ aref_args	: none
 		| args ',' assocs trailer
 		    {
 		    /*%%%*/
-			$$ = arg_append($1, new_hash($3));
+			$$ = $3 ? arg_append($1, new_hash($3)) : $1;
 		    /*%
 			$$ = arg_add_assocs($1, $3);
 		    %*/
@@ -2413,7 +2415,7 @@ aref_args	: none
 		| assocs trailer
 		    {
 		    /*%%%*/
-			$$ = NEW_LIST(new_hash($1));
+			$$ = $1 ? NEW_LIST(new_hash($1)) : 0;
 		    /*%
 			$$ = arg_add_assocs(arg_new(), $1);
 		    %*/
@@ -2443,7 +2445,7 @@ opt_call_args	: none
 		| args ',' assocs ','
 		    {
 		    /*%%%*/
-			$$ = arg_append($1, new_hash($3));
+			$$ = $3 ? arg_append($1, new_hash($3)) : $1;
 		    /*%
 			$$ = arg_add_assocs($1, $3);
 		    %*/
@@ -2451,7 +2453,7 @@ opt_call_args	: none
 		| assocs ','
 		    {
 		    /*%%%*/
-			$$ = NEW_LIST(new_hash($1));
+			$$ = $1 ? NEW_LIST(new_hash($1)) : 0;
 		    /*%
 			$$ = arg_add_assocs(arg_new(), $1);
 		    %*/
@@ -2478,7 +2480,7 @@ call_args	: command
 		| assocs opt_block_arg
 		    {
 		    /*%%%*/
-			$$ = NEW_LIST(new_hash($1));
+			$$ = NEW_LIST($1 ? new_hash($1) : 0);
 			$$ = arg_blk_pass($$, $2);
 		    /*%
 			$$ = arg_add_assocs(arg_new(), $1);
@@ -2488,7 +2490,7 @@ call_args	: command
 		| args ',' assocs opt_block_arg
 		    {
 		    /*%%%*/
-			$$ = arg_append($1, new_hash($3));
+			$$ = $3 ? arg_append($1, new_hash($3)) : $1;
 			$$ = arg_blk_pass($$, $4);
 		    /*%
 			$$ = arg_add_optblock(arg_add_assocs($1, $3), $4);
@@ -2825,7 +2827,7 @@ primary		: literal
 		  k_end
 		    {
 		    /*%%%*/
-			$$ = NEW_IF(cond($2), $4, $5);
+			$$ = new_if($2, $4, $5);
 			fixpos($$, $2);
 		    /*%
 			$$ = dispatch3(if, $2, $4, escape_Qundef($5));
@@ -2906,41 +2908,23 @@ primary		: literal
 			NODE *m = NEW_ARGS_AUX(0, 0);
 			NODE *args, *scope;
 
-			if (nd_type($2) == NODE_MASGN) {
-			    /* if args.length == 1 && args[0].kind_of?(Array)
-			     *   args = args[0]
-			     * end
-			     */
-			    NODE *one = NEW_LIST(NEW_LIT(INT2FIX(1)));
-			    NODE *zero = NEW_LIST(NEW_LIT(INT2FIX(0)));
-			    m->nd_next = block_append(
-				NEW_IF(
-				    NEW_NODE(NODE_AND,
-					     NEW_CALL(NEW_CALL(NEW_DVAR(id), idLength, 0),
-						      idEq, one),
-					     NEW_CALL(NEW_CALL(NEW_DVAR(id), idAREF, zero),
-						      rb_intern("kind_of?"), NEW_LIST(NEW_LIT(rb_cArray))),
-					     0),
-				    NEW_DASGN_CURR(id,
-						   NEW_CALL(NEW_DVAR(id), idAREF, zero)),
-				    0),
-				node_assign($2, NEW_DVAR(id)));
-
+			switch (nd_type($2)) {
+			  case NODE_MASGN:
+			    m->nd_next = node_assign($2, NEW_FOR(NEW_DVAR(id), 0, 0));
 			    args = new_args(m, 0, id, 0, new_args_tail(0, 0, 0));
-			}
-			else {
-			    if (nd_type($2) == NODE_LASGN ||
-				nd_type($2) == NODE_DASGN ||
-				nd_type($2) == NODE_DASGN_CURR) {
-				$2->nd_value = NEW_DVAR(id);
-				m->nd_plen = 1;
-				m->nd_next = $2;
-				args = new_args(m, 0, 0, 0, new_args_tail(0, 0, 0));
-			    }
-			    else {
-				m->nd_next = node_assign(NEW_MASGN(NEW_LIST($2), 0), NEW_DVAR(id));
-				args = new_args(m, 0, id, 0, new_args_tail(0, 0, 0));
-			    }
+			    break;
+			  case NODE_LASGN:
+			  case NODE_DASGN:
+			  case NODE_DASGN_CURR:
+			    $2->nd_value = NEW_DVAR(id);
+			    m->nd_plen = 1;
+			    m->nd_next = $2;
+			    args = new_args(m, 0, 0, 0, new_args_tail(0, 0, 0));
+			    break;
+			  default:
+			    m->nd_next = node_assign(NEW_MASGN(NEW_LIST($2), 0), NEW_DVAR(id));
+			    args = new_args(m, 0, id, 0, new_args_tail(0, 0, 0));
+			    break;
 			}
 			scope = NEW_NODE(NODE_SCOPE, tbl, $8, args);
 			tbl[0] = 1; tbl[1] = id;
@@ -3206,7 +3190,7 @@ if_tail		: opt_else
 		  if_tail
 		    {
 		    /*%%%*/
-			$$ = NEW_IF(cond($2), $4, $5);
+			$$ = new_if($2, $4, $5);
 			fixpos($$, $2);
 		    /*%
 			$$ = dispatch3(elsif, $2, $4, escape_Qundef($5));
@@ -3534,14 +3518,19 @@ lambda		:   {
 		    {
 			$<num>$ = ruby_sourceline;
 		    }
+		    {
+			$<val>$ = cmdarg_stack;
+			cmdarg_stack = 0;
+		    }
 		  lambda_body
 		    {
 			lpar_beg = $<num>2;
+			cmdarg_stack = $<val>5;
 		    /*%%%*/
-			$$ = NEW_LAMBDA($3, $5);
+			$$ = NEW_LAMBDA($3, $6);
 			nd_set_line($$, $<num>4);
 		    /*%
-			$$ = dispatch2(lambda, $3, $5);
+			$$ = dispatch2(lambda, $3, $6);
 		    %*/
 			dyna_pop($<vars>1);
 		    }
@@ -5039,13 +5028,19 @@ assocs		: assoc
 		    /*%%%*/
 			NODE *assocs = $1;
 			NODE *tail = $3;
-			if (assocs->nd_head &&
-			    !tail->nd_head && nd_type(tail->nd_next) == NODE_ARRAY &&
-			    nd_type(tail->nd_next->nd_head) == NODE_HASH) {
-			    /* DSTAR */
-			    tail = tail->nd_next->nd_head->nd_head;
+			if (!assocs) {
+			    assocs = tail;
 			}
-			$$ = list_concat(assocs, tail);
+			else if (tail) {
+			    if (assocs->nd_head &&
+				!tail->nd_head && nd_type(tail->nd_next) == NODE_ARRAY &&
+				nd_type(tail->nd_next->nd_head) == NODE_HASH) {
+				/* DSTAR */
+				tail = tail->nd_next->nd_head->nd_head;
+			    }
+			    assocs = list_concat(assocs, tail);
+			}
+			$$ = assocs;
 		    /*%
 			$$ = rb_ary_push($1, $3);
 		    %*/
@@ -5083,7 +5078,11 @@ assoc		: arg_value tASSOC arg_value
 		| tDSTAR arg_value
 		    {
 		    /*%%%*/
-			$$ = list_append(NEW_LIST(0), $2);
+			if (nd_type($2) == NODE_HASH &&
+			    !($2->nd_head && $2->nd_head->nd_alen))
+			    $$ = 0;
+			else
+			    $$ = list_append(NEW_LIST(0), $2);
 		    /*%
 			$$ = dispatch1(assoc_splat, $2);
 		    %*/
@@ -5687,6 +5686,7 @@ rb_parser_compile_file_path(volatile VALUE vparser, VALUE fname, VALUE file, int
 #define STR_FUNC_QWORDS 0x08
 #define STR_FUNC_SYMBOL 0x10
 #define STR_FUNC_INDENT 0x20
+#define STR_FUNC_LABEL  0x40
 
 enum string_type {
     str_squote = (0),
@@ -7675,8 +7675,13 @@ parse_gvar(struct parser_params *parser, const enum lex_state_e last_state)
 
       default:
 	if (!parser_is_identchar()) {
-	    pushback(c);
-	    compile_error(PARSER_ARG "`$%c' is not allowed as a global variable name", c);
+	    if (c == -1 || ISSPACE(c)) {
+		compile_error(PARSER_ARG "`$' without identifiers is not allowed as a global variable name");
+	    }
+	    else {
+		pushback(c);
+		compile_error(PARSER_ARG "`$%c' is not allowed as a global variable name", c);
+	    }
 	    return 0;
 	}
       case '0':
@@ -7859,7 +7864,7 @@ parser_yylex(struct parser_params *parser)
 	}
 	else {
 	    token = parse_string(lex_strterm);
-	    if (token == tSTRING_END && (peek_n('\'', -1) || peek_n('"', -1))) {
+	    if ((token == tSTRING_END) && (lex_strterm->nd_func & STR_FUNC_LABEL)) {
 		if (((IS_lex_state(EXPR_BEG | EXPR_ENDFN) && !COND_P()) || IS_ARG()) &&
 		    IS_LABEL_SUFFIX(0)) {
 		    nextc();
@@ -8140,7 +8145,7 @@ parser_yylex(struct parser_params *parser)
 	return '>';
 
       case '"':
-	lex_strterm = NEW_STRTERM(str_dquote, '"', 0);
+	lex_strterm = NEW_STRTERM(str_dquote|STR_FUNC_LABEL, '"', 0);
 	return tSTRING_BEG;
 
       case '`':
@@ -8159,7 +8164,7 @@ parser_yylex(struct parser_params *parser)
 	return tXSTRING_BEG;
 
       case '\'':
-	lex_strterm = NEW_STRTERM(str_squote, '\'', 0);
+	lex_strterm = NEW_STRTERM(str_squote|STR_FUNC_LABEL, '\'', 0);
 	return tSTRING_BEG;
 
       case '?':
@@ -9645,16 +9650,51 @@ cond_gen(struct parser_params *parser, NODE *node)
 }
 
 static NODE*
+new_if_gen(struct parser_params *parser, NODE *cc, NODE *left, NODE *right)
+{
+    if (!cc) return right;
+    cc = cond0(parser, cc);
+    switch (nd_type(cc)) {
+      case NODE_NIL:
+      case NODE_FALSE:
+	return right;
+      case NODE_TRUE:
+      case NODE_LIT:
+      case NODE_STR:
+	return left;
+    }
+    return NEW_IF(cc, left, right);
+}
+
+static NODE*
 logop_gen(struct parser_params *parser, enum node_type type, NODE *left, NODE *right)
 {
     value_expr(left);
-    if (left && (enum node_type)nd_type(left) == type) {
+    if (!left) {
+	if (!in_defined && type == NODE_AND) return 0;
+	/* make NODE_OR not to be "void value expression" */
+    }
+    else if ((enum node_type)nd_type(left) == type) {
 	NODE *node = left, *second;
 	while ((second = node->nd_2nd) != 0 && (enum node_type)nd_type(second) == type) {
 	    node = second;
 	}
 	node->nd_2nd = NEW_NODE(type, second, right, 0);
 	return left;
+    }
+    else if (!in_defined) {
+	switch (nd_type(left)) {
+	  case NODE_NIL:
+	  case NODE_FALSE:
+	    if (type == NODE_AND) return left;
+	    break;
+	  case NODE_TRUE:
+	  case NODE_LIT:
+	  case NODE_STR:
+	    if (type != NODE_AND) return left;
+	    nd_set_type(left, NODE_TRUE);
+	    break;
+	}
     }
     return NEW_NODE(type, left, right, 0);
 }
@@ -9703,7 +9743,7 @@ negate_lit(VALUE lit)
       case T_BIGNUM:
       case T_RATIONAL:
       case T_COMPLEX:
-	lit = rb_funcall(lit,tUMINUS,0,0);
+	lit = rb_funcallv(lit, tUMINUS, 0, 0);
 	break;
       case T_FLOAT:
 #if USE_FLONUM
